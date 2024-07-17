@@ -85,9 +85,9 @@ Green and Yellow of the panel go to A and B of the MAX485
 
  ## MAX485 to Wemos D1 Mini
 
- Yellow of the MAX485 goes to RX of the ESP
+ Yellow of the MAX485 goes to RTX of the ESP
  
- Green of the MAX485 goes to TX of the ESP 
+ Green of the MAX485 goes to RX of the ESP 
  
  DE/RE are linked together (you need to do the link), of the MAX485, and goes to pin4 as D2 of the ESP
 
