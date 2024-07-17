@@ -74,7 +74,7 @@ Then, It will be powered from the Panel ( black/red +12v).
 
 You'll need a converter from 12v to 5v with minimum of 2A. 
 
-5V power supply from the converter will supply the MAX485, and the ESP8266 (Wemos here).
+5V power supply from the converter will supply the MAX485 (GND and vcc), and the ESP8266 (Wemos here) (5v and GND pin).
 
  ## Heat pump Panel to MAX485 interface
 
@@ -86,7 +86,9 @@ Green and Yellow of the panel go to A and B of the MAX485
  ## MAX485 to Wemos D1 Mini
 
  Yellow of the MAX485 goes to RX of the ESP
+ 
  Green of the MAX485 goes to TX of the ESP 
+ 
  DE/RE are linked together (you need to do the link), of the MAX485, and goes to pin4 as D2 of the ESP
 
 # Easy to debug for your case 
