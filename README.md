@@ -35,6 +35,13 @@ Next step is sending commands to Poolex heat pump :
 * Wifi bandwith where the heat pump is located 
 * Small IP67 box where to put the system
 
+# References & greatings
+
+* From where I started : [esp8266_poolstar repostory](https://github.com/cribskip/esp8266_poolstar)
+* Understanding the different protocol : [esp8266 fork from Cyril](https://github.com/cribskip/esp8266_poolstar/issues/2)
+* [Python version](https://github.com/cyrilpawelko/poolstarmon/tree/main/micropython)
+* [Exploration thread on Heatpump using Modbus](https://community.jeedom.com/t/domotiser-pac-inverter-de-piscine-irrijardin-warmpool-aide-connection-rs485/42440/77?page=5)
+
 # Installation
 
 ## IDE and runtime
@@ -51,10 +58,16 @@ It's a four wire cable where :
 * Green+Yellow : UART RX/TX
 * Black+Red : Power supply 12v
 
+![alt](img/controller.png)
+
 I created a harness for making this system disconnectable.
 
 By design, the quality of the connector are very poor. They fastly oxydize. I use DEUTSCH connectors, water proof and high quality designed. 
 
+![alt](img/deutsch_connectors.png)
+ 
+
+# Easy to debug for your case 
 
 ## Debugging 
 
@@ -67,9 +80,9 @@ So I decided to find a way to isolate message even if I don't have the start or 
 
 Reading a lot of documentation, I figured out it's possible to rely on reading timeout to isolated a frame reception. This allowed me to structure permanently the way I receive UART message. 
 
-Following that, time to decrypt messages. 
+Following that, time to decrypt messages.
 
-# Easy to debug for your case 
+## Debug functions
 
 This project is designed to speed up the exploration process.
 
@@ -126,8 +139,48 @@ Once published, you will see in your remotedebug flow :
 
 You can totally break the OTA process if you push a bad code or if you overcharge the loop process of the Arduino. 
 
+# Home Assistant integration 
 
+I've chosen to use MQTT for easy integration to Home Assistant. 
+ESP Home didn't allow me to fully customize my exploration process so I didn't use it. 
 
+In your configuration.yml : 
+
+```
+mqtt:
+  
+  sensor: 
+
+    - name: "Pool water tempetature"
+      state_topic: "poolheater/values/water_in_temp"
+      force_update: true
+      unit_of_measurement: "°C"
+
+    - name: "Pool water OUT tempetature"
+      state_topic: "poolheater/values/water_out_temp"
+      force_update: true
+      unit_of_measurement: "°C"
+
+    - name: "Heat pump status"
+      state_topic: "poolheater/values/active_status"
+      force_update: true
+      
+    - name: "Heat pump ambient air temperature"
+      state_topic: "poolheater/values/air_ambient_temp"
+      force_update: true
+
+    - name: "Heat pump gaz temperature"
+      state_topic: "poolheater/values/gaz_temp"
+      force_update: true
+
+    - name: "Heat pump coil temperature"
+      state_topic: "poolheater/values/coil_temp"
+      force_update: true
+```
+
+Results : 
+
+![alt](img/HA_integration.png)
 
 ## Contributing
 
