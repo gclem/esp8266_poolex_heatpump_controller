@@ -29,7 +29,7 @@ Next step is sending commands to Poolex heat pump :
 
 # Hardware 
 
-* Wemos D1_Mini
+* Wemos D1_Mini ESP8266
 * MAX 485 UART interface 
 * Power supply converter from 12v to 5v 
 * Wifi bandwith where the heat pump is located 
@@ -65,7 +65,29 @@ I created a harness for making this system disconnectable.
 By design, the quality of the connector are very poor. They fastly oxydize. I use DEUTSCH connectors, water proof and high quality designed. 
 
 ![alt](img/deutsch_connectors.png)
- 
+
+## Power supply
+
+For the first upload of the program, you will power this up from Micro USB of your computer.
+
+Then, It will be powered from the Panel ( black/red +12v).
+
+You'll need a converter from 12v to 5v with minimum of 2A. 
+
+5V power supply from the converter will supply the MAX485, and the ESP8266 (Wemos here).
+
+ ## Heat pump Panel to MAX485 interface
+
+Heat pump panel has 4 wires. 
+
+Green and Yellow of the panel go to A and B of the MAX485
+
+
+ ## MAX485 to Wemos D1 Mini
+
+ Yellow of the MAX485 goes to RX of the ESP
+ Green of the MAX485 goes to TX of the ESP 
+ DE/RE are linked together (you need to do the link), of the MAX485, and goes to pin4 as D2 of the ESP
 
 # Easy to debug for your case 
 
