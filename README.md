@@ -89,7 +89,7 @@ Green and Yellow of the panel go to A and B of the MAX485
  
  Green of the MAX485 goes to RX of the ESP 
  
- DE/RE are linked together (you need to do the link), of the MAX485, and goes to pin4 as D2 of the ESP
+ DE/RE are linked together (you need to do the link), of the MAX485, and goes to pin2 as D4 of the ESP
 
 # Easy to debug for your case 
 
