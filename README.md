@@ -120,7 +120,7 @@ Through MQTT, you can push a unsigned int16 in a RAW message - This is the timeo
 ![alt](img/timeout_config.png)
 
 Once published, you will see in your remotedebug flow : 
-![alt](img/timeout_setting.png.png)
+![alt](img/timeout_setting.png)
 
 ## Attention
 
