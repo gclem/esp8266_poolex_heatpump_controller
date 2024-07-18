@@ -41,6 +41,8 @@ Next step is sending commands to Poolex heat pump :
 * Understanding the different protocol : [esp8266 fork from Cyril](https://github.com/cribskip/esp8266_poolstar/issues/2)
 * [Python version](https://github.com/cyrilpawelko/poolstarmon/tree/main/micropython)
 * [Exploration thread on Heatpump using Modbus](https://community.jeedom.com/t/domotiser-pac-inverter-de-piscine-irrijardin-warmpool-aide-connection-rs485/42440/77?page=5)
+* Reverse engineering of Hayward pump [Forum Arduino](https://forum.arduino.cc/t/resolu-reverse-engineering-protocole-thermopompe-hayward/249705)
+* Reverse of Poolex Dreamline pump [Repository](https://github.com/CDX-24/PoolexDreamlineController/tree/main)
 
 # Installation
 
