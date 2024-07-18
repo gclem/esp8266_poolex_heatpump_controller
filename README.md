@@ -1,7 +1,7 @@
 # ESP8266 Poolex heatpump UART parser to MQTT 
 
 This project aims to control Poolex heatpump Jetline series. 
-This kind of heatpump use UART protocol (no modbus) - at 9600 8N1, with 50 ms (52 with break condition)
+This kind of heatpump use UART protocol (no modbus, no TUYA) - at 9600 8N1, with 50 ms (52 with break condition). 
 
 This project is a personal project - dedicated to understand the communication flow through UART of a Poolex Jetline Selection 95 Pool heatpump and push all system informations to Home Assistant through MQTT.
 
