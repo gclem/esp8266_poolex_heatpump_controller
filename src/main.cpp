@@ -14,30 +14,43 @@
 
 // Protocol bus — trames identifiées par analyse des captures (sniffing1..6.txt)
 //
-//  Cycle bus (~190ms) :
+//  Cycle bus (~190ms) — pattern alternant :
+//   [PAC→remote] 0xFF [flags] [21B capteurs][9B config] : trame complète (sensor+config)
 //   [remote→PAC] 0x19 (12B) : heartbeat télécommande, constant
 //   [PAC→remote] 0xFD (13B) : ACK PAC
-//   [PAC→remote] 0xFF [flags] 0x2C ... (11-15B) : trame config courte (setpoint ?)
-//   [PAC→remote] 0xFF [flags] <data> (29-36B)   : trame capteurs (températures)
+//   [PAC→remote] 0xFF [flags] 0x2C ... (9B config seule) : trame config uniquement
+//   [remote→PAC] 0x19 (12B) : heartbeat télécommande
+//   [PAC→remote] 0xFD (13B) : ACK PAC
+//   ... (le cycle complet se répète)
 //
 //  Séparateur inter-trames : octets 0x01 (idle bus)
 //
-//  Décodage températures (trame capteurs, après FF + flag bytes) :
+//  Structure trame PAC : FF [flag1: 00|80] [flag2 optionnel: 06|08|28|FC] <payload>
+//  Deux types de payload (différenciés par le 1er octet) :
+//   - Capteurs (21B) : data[0..6] encodent les températures (data[0] varie avec water_in)
+//   - Config   (9B)  : débute par 0x2C, suivi de 8B de configuration (setpoint, mode...)
+//
+//  Dans les trames longues, les 21B capteurs sont directement suivis des 9B config (sans FF).
+//
+//  Décodage températures (après saut des FF + flag bytes) :
 //    data[0] → water_in_temp    = ((0xFF - data[0]) >> 3) & 0b111111
 //    data[1] → air_ambient_temp = ((0xFF - data[1]) >> 1) & 0b111111
 //    data[2] → coil_temp        = ((0xFF - data[2]) >> 1) & 0b111111
 //    data[3] → gas_temp         = ((0xFF - data[3]) >> 1) & 0b111111
 //    data[4] → water_out_temp   = ((0xFF - data[4]) >> 1) & 0b111111
 //    data[6] → active_status    = ((0xFF - data[6]) >> 4) & 0b000001
-#define FRAME_IDLE_BYTE    0x01  // séparateur inter-trames sur le bus
-#define FRAME_SYNC_BYTE    0xFF  // octet de synchronisation précédant les trames PAC
-#define FRAME_HDR_REMOTE   0x19  // heartbeat télécommande → PAC (12B)
-#define FRAME_HDR_REMOTE_2 0x04  // 2ème octet fixe du heartbeat
-#define FRAME_HDR_PAC_ACK  0xFD  // ACK PAC → télécommande (13B)
-#define FRAME_HDR_PAC_ACK2 0xF5  // 2ème octet fixe du ACK
-#define SENSOR_FRAME_MIN_LEN 25  // longueur minimale d'un burst FF pour contenir des capteurs
-#define SENSOR_TEMP_MIN      5   // °C — borne basse plausible pour validation
-#define SENSOR_TEMP_MAX     45   // °C — borne haute plausible pour validation
+#define FRAME_IDLE_BYTE       0x01  // séparateur inter-trames sur le bus
+#define FRAME_SYNC_BYTE       0xFF  // octet de synchronisation précédant les trames PAC
+#define FRAME_HDR_REMOTE      0x19  // heartbeat télécommande → PAC (12B)
+#define FRAME_HDR_REMOTE_2    0x04  // 2ème octet fixe du heartbeat
+#define FRAME_HDR_PAC_ACK     0xFD  // ACK PAC → télécommande (13B)
+#define FRAME_HDR_PAC_ACK2    0xF5  // 2ème octet fixe du ACK
+#define FRAME_TYPE_CONFIG     0x2C  // 1er byte du payload config (setpoint/mode)
+#define SENSOR_DATA_LEN       21    // longueur fixe du payload capteurs (hors FF+flags)
+#define CONFIG_DATA_LEN        9    // longueur fixe du payload config (incl. le 0x2C)
+#define SENSOR_FRAME_MIN_LEN  25    // longueur minimale d'un burst FF pour contenir des capteurs
+#define SENSOR_TEMP_MIN        5    // °C — borne basse plausible pour validation
+#define SENSOR_TEMP_MAX       45    // °C — borne haute plausible pour validation
 
 // COMMUNICATIONS PARAMETERS
 #define USE_MDNS true
@@ -75,12 +88,15 @@ char *MQTT_TOPIC_VALUES_AIR_AMBIENT_TEMP = "poolheater/values/air_ambient_temp";
 char *MQTT_TOPIC_VALUES_COIL_TEMP = "poolheater/values/coil_temp";
 char *MQTT_TOPIC_VALUES_GAZ_TEMP = "poolheater/values/gaz_temp";
 char *MQTT_TOPIC_VALUES_ACTIVE_STATUS = "poolheater/values/active_status";
+// Config frame — 8 bytes après 0x2C (setpoint, mode...) — à décoder en comparant captures
+char *MQTT_TOPIC_VALUES_CONFIG_RAW = "poolheater/values/config_raw";
 
 
 // FUNC DECLARATIONS
 void sniffing();
 void processBurst(const uint8_t *burst, int len);
 bool processSensorBurst(const uint8_t *burst, int len);
+void processConfigPayload(const uint8_t *config_data, int len);
 String hexDump(const uint8_t *buf, int len);
 void connectToMQTTBroker();
 void pushMQTTMessage(char *topic, const char *message);
@@ -248,7 +264,7 @@ void processBurst(const uint8_t *burst, int len)
     return;
   }
 
-  // Trames PAC préfixées FF [flags] <data> : capteurs (>=25B) ou config courte (<25B)
+  // Trames PAC préfixées FF [flags] <data> : capteurs (>=25B) ou config seule (<25B)
   if (burst[0] == FRAME_SYNC_BYTE)
   {
     if (len >= SENSOR_FRAME_MIN_LEN)
@@ -258,8 +274,15 @@ void processBurst(const uint8_t *burst, int len)
     }
     else
     {
-      // Trame courte (config/setpoint PAC → remote) : à décoder dans une future itération
-      debugV("FF-short   (%2dB): %s", len, hexDump(burst, len).c_str());
+      // Trame config seule : FF [flags] 2C <8B config>
+      int d = 1;
+      if (d < len && (burst[d] == 0x00 || burst[d] == 0x80))                         d++;
+      if (d < len && (burst[d] == 0xFC || burst[d] == 0x06 ||
+                      burst[d] == 0x08 || burst[d] == 0x28))                         d++;
+      if (d < len && burst[d] == FRAME_TYPE_CONFIG)
+        processConfigPayload(burst + d, len - d);
+      else
+        debugV("FF-short UNKNOWN(%dB): %s", len, hexDump(burst, len).c_str());
     }
     return;
   }
@@ -275,7 +298,8 @@ void processBurst(const uint8_t *burst, int len)
 }
 
 // Décode la trame capteurs depuis un burst FF-préfixé.
-// Structure : FF [0x00|0x80] [flag optionnel: 0x06/0x08/0xFC] <data...>
+// Structure : FF [0x00|0x80] [flag optionnel: 0x06/0x08/0x28/0xFC] <sensor_21B> [<config_9B>]
+// Dans les trames longues, les 21B capteurs sont directement suivis des 9B config (sans FF).
 // Retourne true si les valeurs sont plausibles et ont été publiées sur MQTT.
 bool processSensorBurst(const uint8_t *burst, int len)
 {
@@ -305,7 +329,25 @@ bool processSensorBurst(const uint8_t *burst, int len)
   pushMQTTValue(MQTT_TOPIC_VALUES_GAZ_TEMP,         gas_temp);
   pushMQTTValue(MQTT_TOPIC_VALUES_AIR_AMBIENT_TEMP, air_ambient);
   pushMQTTValue(MQTT_TOPIC_VALUES_ACTIVE_STATUS,    active);
+
+  // Dans les trames longues, les 9B config suivent immédiatement les 21B capteurs
+  int config_offset = d + SENSOR_DATA_LEN;
+  if (config_offset < len && burst[config_offset] == FRAME_TYPE_CONFIG)
+    processConfigPayload(burst + config_offset, len - config_offset);
+
   return true;
+}
+
+// Décode le payload config (9B : 0x2C + 8B état PAC).
+// Contenu inconnu à ce stade — logger en raw pour identifier le setpoint par diff.
+// Pour décoder : modifier la consigne sur la télécommande réelle et comparer les captures.
+void processConfigPayload(const uint8_t *config_data, int len)
+{
+  if (len < CONFIG_DATA_LEN) return;
+  // config_data[0] = 0x2C (marqueur)
+  // config_data[1..8] = état PAC (setpoint, mode, ...) — à décoder
+  debugI("Config     : %s", hexDump(config_data, CONFIG_DATA_LEN).c_str());
+  pushMQTTMessage(MQTT_TOPIC_VALUES_CONFIG_RAW, hexDump(config_data, CONFIG_DATA_LEN).c_str());
 }
 
 void connectToMQTTBroker()
