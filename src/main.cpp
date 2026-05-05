@@ -58,31 +58,33 @@ PubSubClient pubsubClient(wifiClient);
 // DEBUGGER VAR
 RemoteDebug Debug;
 
-// BUFFER
-String message = "";
-const char *c_msg = "";
-
 // TX PROBE STATE
 volatile bool probe_pending = false;
 static uint8_t probe_counter = 0x01;
+
+// MQTT rate limiting — ne publie que si la valeur a changé
+static int last_water_in = -1, last_water_out = -1, last_air = -1;
+static int last_coil = -1, last_gas = -1, last_power = -1, last_heating = -1;
+static int last_setpoint = -1, last_setpoint_confirmed = -1;
+
+// MQTT reconnect throttle
+static unsigned long mqtt_last_attempt = 0;
+const unsigned long MQTT_RECONNECT_INTERVAL_MS = 5000;
 // MQTT TOPICS
-char *MQTT_TOPIC_RAW_MSG_HEX = "poolheater/modbus/raw/pump/hex";
-char *MQTT_TOPIC_DEBUG_MSG = "poolheater/debug";
-char *MQTT_TOPIC_STATUS = "poolheater/status";
-char *MQTT_TOPIC_COMMAND_FRAME_TIMEOUT = "poolheater/command/frame/timeout";
+const char *MQTT_TOPIC_STATUS = "poolheater/status";
 // MQTT VALUES
-char *MQTT_TOPIC_VALUES_WATER_IN_TEMP = "poolheater/values/water_in_temp";
-char *MQTT_TOPIC_VALUES_WATER_OUT_TEMP = "poolheater/values/water_out_temp";
-char *MQTT_TOPIC_VALUES_AIR_AMBIENT_TEMP = "poolheater/values/air_ambient_temp";
-char *MQTT_TOPIC_VALUES_COIL_TEMP = "poolheater/values/coil_temp";
-char *MQTT_TOPIC_VALUES_GAZ_TEMP = "poolheater/values/gaz_temp";
-char *MQTT_TOPIC_VALUES_ACTIVE_STATUS = "poolheater/values/active_status";
-char *MQTT_TOPIC_VALUES_SETPOINT = "poolheater/values/setpoint";
-char *MQTT_TOPIC_VALUES_SETPOINT_CONFIRMED = "poolheater/values/setpoint_confirmed";
+const char *MQTT_TOPIC_VALUES_WATER_IN_TEMP = "poolheater/values/water_in_temp";
+const char *MQTT_TOPIC_VALUES_WATER_OUT_TEMP = "poolheater/values/water_out_temp";
+const char *MQTT_TOPIC_VALUES_AIR_AMBIENT_TEMP = "poolheater/values/air_ambient_temp";
+const char *MQTT_TOPIC_VALUES_COIL_TEMP = "poolheater/values/coil_temp";
+const char *MQTT_TOPIC_VALUES_GAZ_TEMP = "poolheater/values/gaz_temp";
+const char *MQTT_TOPIC_VALUES_ACTIVE_STATUS = "poolheater/values/active_status";
+const char *MQTT_TOPIC_VALUES_SETPOINT = "poolheater/values/setpoint";
+const char *MQTT_TOPIC_VALUES_SETPOINT_CONFIRMED = "poolheater/values/setpoint_confirmed";
 // Partie état/config (burst long sans les 9B capteurs) — pour analyse future
-char *MQTT_TOPIC_VALUES_STATE_RAW = "poolheater/values/state_raw";
+const char *MQTT_TOPIC_VALUES_STATE_RAW = "poolheater/values/state_raw";
 // MQTT COMMANDS
-char *MQTT_TOPIC_COMMAND_PROBE = "poolheater/command/probe";
+const char *MQTT_TOPIC_COMMAND_PROBE = "poolheater/command/probe";
 
 
 // FUNC DECLARATIONS
@@ -90,12 +92,11 @@ void sniffing();
 void processBurst(const uint8_t *burst, int len);
 bool decodeSensorTail(const uint8_t *tail);
 void sendProbeHB();
-String hexDump(const uint8_t *buf, int len);
+const char* hexDumpFast(const uint8_t *buf, int len);
 void connectToMQTTBroker();
-void pushMQTTMessage(char *topic, const char *message);
-void pushMQTTValue(char *topic, int value);
+void pushMQTTMessage(const char *topic, const char *message);
+void pushMQTTValue(const char *topic, int value);
 void mqttReceiveCallback(char *topic, byte *payload, unsigned int length);
-void pushMQTTValue(char *topic, int value);
 
 void setup()
 {
@@ -149,7 +150,6 @@ void setup()
 
   // OTA
   ArduinoOTA.setHostname(HOST_NAME);
-  ArduinoOTA.begin();
   ArduinoOTA.onStart([]()
                      { Serial.println("Starting OTA..."); });
   ArduinoOTA.onEnd([]()
@@ -174,7 +174,6 @@ void setup()
 
   // Init UART Protocol
   Serial.println("UART Protocol is initializing...");
-  PS.setTimeout(50);
   PS.begin(PORT_SPEED, SWSERIAL_8N1, UART_RX, UART_TX, false);
   Serial.println("UART Protocol is listening...");
 }
@@ -193,7 +192,8 @@ void loop()
 
   if (!pubsubClient.connected())
   {
-    connectToMQTTBroker();
+    if (millis() - mqtt_last_attempt > MQTT_RECONNECT_INTERVAL_MS)
+      connectToMQTTBroker();
   }
 
   pubsubClient.loop();
@@ -208,24 +208,25 @@ void loop()
   sniffing();
 }
 
-// Retourne un dump hexadécimal lisible d'un buffer.
-String hexDump(const uint8_t *buf, int len)
+// Retourne un dump hexadécimal lisible d'un buffer (buffer statique, pas d'allocation heap).
+static char hex_buf[768]; // max 250 bytes * 3 chars + null
+const char* hexDumpFast(const uint8_t *buf, int len)
 {
-  String out = "";
-  for (int i = 0; i < len; i++)
+  int pos = 0;
+  for (int i = 0; i < len && pos < (int)sizeof(hex_buf) - 4; i++)
   {
-    if (buf[i] < 0x10) out += "0";
-    out += String(buf[i], HEX);
-    out += " ";
+    pos += snprintf(hex_buf + pos, sizeof(hex_buf) - pos, "%02X ", buf[i]);
   }
-  out.toUpperCase();
-  return out;
+  if (pos > 0) hex_buf[pos - 1] = '\0'; // enlève le dernier espace
+  else hex_buf[0] = '\0';
+  return hex_buf;
 }
 
 // Buffer résiduel — conserve les bytes non terminés entre les appels readBytes.
-// Nécessaire car le timeout de 50ms coupe souvent une trame en plusieurs lectures.
 static uint8_t residual[300];
 static int residual_len = 0;
+static unsigned long residual_last_activity = 0;
+const unsigned long RESIDUAL_TIMEOUT_MS = 100; // flush si pas de nouvelles données pendant 100ms
 
 // Lit le bus RS485 et découpe le flux en bursts (séquences non-0x01).
 // Accumule les bytes dans un buffer résiduel pour gérer les trames coupées par le timeout.
@@ -234,16 +235,27 @@ void sniffing()
   const int READ_SIZE = 250;
   uint8_t buf[READ_SIZE];
 
-  if (PS.available() <= 0) return;
+  int avail = PS.available();
+  if (avail <= 0)
+  {
+    // Si le residual stagne sans terminateur, forcer le traitement
+    if (residual_len > 0 && (millis() - residual_last_activity) > RESIDUAL_TIMEOUT_MS)
+    {
+      if (residual_len >= 3)
+        processBurst(residual, residual_len);
+      residual_len = 0;
+    }
+    return;
+  }
 
-  Debug.handle();
-  ArduinoOTA.handle();
-  pubsubClient.loop();
+  residual_last_activity = millis();
 
-  int size = PS.readBytes((char *)buf, READ_SIZE);
+  // Lire uniquement ce qui est disponible — ne jamais bloquer
+  int to_read = min(avail, READ_SIZE);
+  int size = PS.readBytes((char *)buf, to_read);
   if (size <= 0) return;
 
-  debugV("raw(%d): %s", size, hexDump(buf, size).c_str());
+  debugV("raw(%d): %s", size, hexDumpFast(buf, size));
 
   // Ajoute les nouvelles données au buffer résiduel
   int copy_len = min(size, (int)(sizeof(residual) - residual_len));
@@ -310,9 +322,9 @@ void processBurst(const uint8_t *burst, int len)
     bool power_cmd = (burst[1] == 0x0C);
     debugD("Remote HB  : setpoint=%d°C (confirmed=%d°C) power_cmd=%d",
            setpoint_requested, setpoint_confirmed, power_cmd);
-    debugV("Remote HB raw: %s", hexDump(burst, len).c_str());
-    pushMQTTValue(MQTT_TOPIC_VALUES_SETPOINT, setpoint_requested);
-    pushMQTTValue(MQTT_TOPIC_VALUES_SETPOINT_CONFIRMED, setpoint_confirmed);
+    debugV("Remote HB raw: %s", hexDumpFast(burst, len));
+    if (setpoint_requested != last_setpoint)           { pushMQTTValue(MQTT_TOPIC_VALUES_SETPOINT, setpoint_requested);           last_setpoint = setpoint_requested; }
+    if (setpoint_confirmed != last_setpoint_confirmed) { pushMQTTValue(MQTT_TOPIC_VALUES_SETPOINT_CONFIRMED, setpoint_confirmed); last_setpoint_confirmed = setpoint_confirmed; }
     return;
   }
 
@@ -320,7 +332,7 @@ void processBurst(const uint8_t *burst, int len)
   // byte[0] varie (FD ou FF selon timing), on identifie par len + bytes[1,3]
   if (len == 13 && burst[1] == 0xF1 && burst[3] == 0xD5)
   {
-    debugV("PAC ACK    : %s", hexDump(burst, len).c_str());
+    debugV("PAC ACK    : %s", hexDumpFast(burst, len));
     return;
   }
 
@@ -340,16 +352,16 @@ void processBurst(const uint8_t *burst, int len)
 
       // Décoder les capteurs (9B en fin)
       if (!decodeSensorTail(burst + sensor_start))
-        debugV("Sensor INVALID: %s", hexDump(burst + sensor_start, SENSOR_TAIL_LEN).c_str());
+        debugV("Sensor INVALID: %s", hexDumpFast(burst + sensor_start, SENSOR_TAIL_LEN));
 
       // La partie avant = flags + état/config machine (pour analyse future)
       if (sensor_start > 0)
-        debugV("State      (%2dB): %s", sensor_start, hexDump(burst, sensor_start).c_str());
+        debugV("State      (%2dB): %s", sensor_start, hexDumpFast(burst, sensor_start));
     }
     else
     {
       // Burst sans terminaison FF FF — log pour analyse
-      debugV("PAC-noterm (%2dB): %s", len, hexDump(burst, len).c_str());
+      debugV("PAC-noterm (%2dB): %s", len, hexDumpFast(burst, len));
     }
     return;
   }
@@ -357,7 +369,7 @@ void processBurst(const uint8_t *burst, int len)
   // Trame courte (flags isolés)
   if (len <= 4)
   {
-    debugV("Short(%dB)  : %s", len, hexDump(burst, len).c_str());
+    debugV("Short(%dB)  : %s", len, hexDumpFast(burst, len));
     return;
   }
 
@@ -365,11 +377,11 @@ void processBurst(const uint8_t *burst, int len)
   if (len == SENSOR_TAIL_LEN && burst[len - 1] == 0xFF && burst[len - 2] == 0xFF && burst[len - 4] == 0xFF)
   {
     if (!decodeSensorTail(burst))
-      debugV("Unknown    (%2dB): %s", len, hexDump(burst, len).c_str());
+      debugV("Unknown    (%2dB): %s", len, hexDumpFast(burst, len));
     return;
   }
 
-  debugV("Unknown    (%2dB): %s", len, hexDump(burst, len).c_str());
+  debugV("Unknown    (%2dB): %s", len, hexDumpFast(burst, len));
 }
 
 // Décode les 9 octets capteurs (fin de burst, terminés FF FF).
@@ -394,12 +406,14 @@ bool decodeSensorTail(const uint8_t *tail)
   debugD("Sensor     : water_in=%d°C water_out=%d°C air=%d°C coil=%d°C gas=%d°C power=%d heating=%d",
          water_in, water_out, air_ambient, coil_temp, gas_temp, power_on, heating);
 
-  pushMQTTValue(MQTT_TOPIC_VALUES_WATER_IN_TEMP,    water_in);
-  pushMQTTValue(MQTT_TOPIC_VALUES_WATER_OUT_TEMP,   water_out);
-  pushMQTTValue(MQTT_TOPIC_VALUES_COIL_TEMP,        coil_temp);
-  pushMQTTValue(MQTT_TOPIC_VALUES_GAZ_TEMP,         gas_temp);
-  pushMQTTValue(MQTT_TOPIC_VALUES_AIR_AMBIENT_TEMP, air_ambient);
-  pushMQTTValue(MQTT_TOPIC_VALUES_ACTIVE_STATUS,    power_on);
+  // Ne publie sur MQTT que si la valeur a changé
+  if (water_in != last_water_in)    { pushMQTTValue(MQTT_TOPIC_VALUES_WATER_IN_TEMP,    water_in);    last_water_in = water_in; }
+  if (water_out != last_water_out)  { pushMQTTValue(MQTT_TOPIC_VALUES_WATER_OUT_TEMP,   water_out);   last_water_out = water_out; }
+  if (air_ambient != last_air)      { pushMQTTValue(MQTT_TOPIC_VALUES_AIR_AMBIENT_TEMP, air_ambient); last_air = air_ambient; }
+  if (coil_temp != last_coil)       { pushMQTTValue(MQTT_TOPIC_VALUES_COIL_TEMP,        coil_temp);   last_coil = coil_temp; }
+  if (gas_temp != last_gas)         { pushMQTTValue(MQTT_TOPIC_VALUES_GAZ_TEMP,         gas_temp);    last_gas = gas_temp; }
+  if (power_on != last_power)       { pushMQTTValue(MQTT_TOPIC_VALUES_ACTIVE_STATUS,    power_on);    last_power = power_on; }
+  if (heating != last_heating)      { pushMQTTValue(MQTT_TOPIC_VALUES_ACTIVE_STATUS,    heating);     last_heating = heating; }
   return true;
 }
 
@@ -428,7 +442,7 @@ void sendProbeHB()
 
   probe_counter += 2;  // incrémente comme la vraie télécommande
 
-  debugI("TX PROBE: %s", hexDump(hb, 12).c_str());
+  debugI("TX PROBE: %s", hexDumpFast(hb, 12));
 
   // Basculer MAX485 en TX
   digitalWrite(UART_RTS, HIGH);
@@ -450,6 +464,7 @@ void sendProbeHB()
 
 void connectToMQTTBroker()
 {
+  mqtt_last_attempt = millis();
 
   if (!pubsubClient.connected())
   {
@@ -458,20 +473,18 @@ void connectToMQTTBroker()
     {
       Debug.println("Connected to MQTT broker.");
       pubsubClient.publish(MQTT_TOPIC_STATUS, "ON", true);
-      pubsubClient.subscribe(MQTT_TOPIC_COMMAND_FRAME_TIMEOUT);
       pubsubClient.subscribe(MQTT_TOPIC_COMMAND_PROBE);
     }
     else
     {
       Debug.print("Failed to connect to MQTT broker, rc=");
       Debug.print(pubsubClient.state());
-      Debug.println("Trying again to connect to MQTT broker... next loop");
-      yield();
+      Debug.println(" — retrying in 5s");
     }
   }
 }
 
-void pushMQTTMessage(char *topic, const char *msg)
+void pushMQTTMessage(const char *topic, const char *msg)
 {
   if (!pubsubClient.connected())
   {
@@ -483,7 +496,7 @@ void pushMQTTMessage(char *topic, const char *msg)
   }
 }
 
-void pushMQTTValue(char *topic, int value)
+void pushMQTTValue(const char *topic, int value)
 {
   if (!pubsubClient.connected())
   {
@@ -499,17 +512,7 @@ void mqttReceiveCallback(char *topic, byte *payload, unsigned int length)
 {
   debugV("Receiving new message from MQTT from %s, value size: %d", topic, length);
 
-  if(strcmp(topic, MQTT_TOPIC_COMMAND_FRAME_TIMEOUT) == 0)
-  {
-    char buff_p[length + 1];
-    for (unsigned int i = 0; i < length; i++)
-      buff_p[i] = (char)payload[i];
-    buff_p[length] = '\0';
-    int timeout = String(buff_p).toInt();
-    debugI("Receiving new frame timeout : %d", timeout);
-    PS.setTimeout(timeout);
-  }
-  else if(strcmp(topic, MQTT_TOPIC_COMMAND_PROBE) == 0)
+  if(strcmp(topic, MQTT_TOPIC_COMMAND_PROBE) == 0)
   {
     debugI("PROBE command received — will send test HB on next loop");
     probe_pending = true;
