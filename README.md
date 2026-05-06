@@ -1,220 +1,307 @@
-# ESP8266 Poolex heatpump UART parser to MQTT 
+# ESP8266 Poolex Heatpump — Sniffer RS485 vers MQTT
 
-This project aims to control Poolex heatpump Jetline series. 
-This kind of heatpump use UART protocol (no modbus, no TUYA) - at 9600 8N1, with 50 ms (52 with break condition). 
+Projet de reverse-engineering du protocole RS485 d'une pompe à chaleur **Poolex Jetline Selection 90** (fonctionne aussi sur la 95).
 
-This project is a personal project - dedicated to understand the communication flow through UART of a Poolex Jetline Selection 95 Pool heatpump and push all system informations to Home Assistant through MQTT.
+Le Wemos D1 Mini écoute passivement le bus RS485 entre la carte mère (PAC) et la télécommande filaire, décode les trames, et publie les valeurs sur MQTT pour **Home Assistant**.
 
-## State of this project
+## État du projet
 
-This project runs on Wemos D1_mini at 160 MHZ, with Wifi interface, Remote Debugger through Telnet.
-It reads UART flow, identity patterns of messages, send sensors values to MQTT and receive commands through MQTT. 
+✅ Fonctionnel — en production depuis mai 2026.
 
-It reads :
-* Water in and out temperature
-* Gas temperature 
-* Coil temperature
-* Exterior temperature 
-* Heatpump ON/OFF status 
+**Ce qui fonctionne :**
+- Lecture des températures : eau entrée/sortie, air ambiant, serpentin (coil), gaz
+- Lecture de l'état : PAC ON/OFF, chauffage actif (compresseur)
+- Lecture de la consigne (setpoint) envoyée par la télécommande
+- Lecture de la consigne confirmée par la PAC
+- Publication MQTT sur changement + republication périodique (60s)
+- Mise à jour OTA (Over The Air)
+- Debug à distance via Telnet (RemoteDebug)
 
-It doesn't YET send commands to heat pump.
+**Ce qui reste à faire :**
+- Envoi de commandes à la PAC (consigne température, ON/OFF)
+- Décodage complet de la partie "état machine" des trames longues
+- Lecture des codes erreur
 
-## Next steps 
+## Architecture
 
-Next step is sending commands to Poolex heat pump : 
-* Sending TARGET temperature
-* Sending programs and Time programmations 
-* Start/Shutdown the pump 
-* Reading Error codes 
+Le firmware complet tient dans un seul fichier : **`src/main.cpp`**.
 
-# Hardware 
+```
+┌─────────────┐     RS485      ┌──────────┐     MQTT      ┌────────────────┐
+│   PAC       │◄──────────────►│ Wemos D1 │──────────────►│ Home Assistant │
+│   Poolex    │     (9600 8N1) │ (sniffer)│               │                │
+└─────────────┘                └──────────┘               └────────────────┘
+       ▲                             ▲
+       │        RS485                │
+       └─────────────────────────────┘
+              Télécommande filaire
+```
 
-* Wemos D1_Mini ESP8266
-* MAX 485 UART interface 
-* Power supply converter from 12v to 5v 
-* Wifi bandwith where the heat pump is located 
-* Small IP67 box where to put the system
+**Topologie du bus :** trois appareils partagent le même bus RS485 half-duplex :
+1. La carte mère PAC
+2. La télécommande filaire d'origine
+3. Le Wemos D1 Mini (sniffer passif — ne transmet jamais)
 
-# References & greatings
+Le Wemos est câblé **en parallèle** avec la télécommande sur le même faisceau.
 
-* From where I started : [esp8266_poolstar repostory](https://github.com/cribskip/esp8266_poolstar)
-* Understanding the different protocol : [esp8266 fork from Cyril](https://github.com/cribskip/esp8266_poolstar/issues/2)
-* [Python version](https://github.com/cyrilpawelko/poolstarmon/tree/main/micropython)
-* [Exploration thread on Heatpump using Modbus](https://community.jeedom.com/t/domotiser-pac-inverter-de-piscine-irrijardin-warmpool-aide-connection-rs485/42440/77?page=5)
-* Reverse engineering of Hayward pump [Forum Arduino](https://forum.arduino.cc/t/resolu-reverse-engineering-protocole-thermopompe-hayward/249705)
-* Reverse of Poolex Dreamline pump [Repository](https://github.com/CDX-24/PoolexDreamlineController/tree/main)
+## Protocole du bus (Jetline 90/95)
 
-# Installation
+### Caractéristiques
+- Vitesse : **9600 baud, 8N1**
+- Cycle : **~190 ms** (2 heartbeats par seconde)
+- Séparateur inter-trames : octets `0x01` (idle bus)
+- CPU cadencé à **160 MHz** pour traitement temps réel
 
-## IDE and runtime
+### Types de trames identifiés
 
-I use C++ language, Arduino regular library, and PlatformIO development platform.
+| Direction | En-tête | Taille | Description |
+|-----------|---------|--------|-------------|
+| remote → PAC | `XX 04 FF ...` | 12 B | Heartbeat télécommande (constant, ~98 ms) |
+| PAC → remote | `FD XX ...` | 6–13 B | ACK PAC |
+| PAC → remote | `[flags] <état> <capteurs>` | 25–36 B | Trame capteurs + état |
 
-You need to have the full development environment of [Platform IO](https://platformio.org/platformio-ide) for making this up. 
+### Décodage des capteurs
 
-## Wiring 
+Les **9 derniers octets** de chaque burst long (≥ 25 B) contiennent les capteurs, terminés par `FF FF` :
 
-I use the controller wiring to connect to the UART bus. 
+```cpp
+water_in_temp    = ((0xFF - data[0]) >> 3) & 0x3F;  // °C
+air_ambient_temp = ((0xFF - data[1]) >> 1) & 0x3F;  // °C
+coil_temp        = ((0xFF - data[2]) >> 1) & 0x3F;  // °C
+gas_temp         = ((0xFF - data[3]) >> 1) & 0x3F;  // °C
+water_out_temp   = ((0xFF - data[4]) >> 1) & 0x3F;  // °C
+// data[5] = 0xFF (constant)
+active_status    = ((0xFF - data[6]) >> 4) & 0x01;  // 1 = PAC ON
+// data[7-8] = FF FF (terminaison)
+```
 
-It's a four wire cable where :
-* Green+Yellow : UART RX/TX
-* Black+Red : Power supply 12v
+La validation se fait par plage de température (5–45 °C) — pas d'en-tête fixe.
 
-![alt](img/controller.png)
+### Consigne (setpoint)
 
-I created a harness for making this system disconnectable.
+La consigne est extraite du heartbeat de la télécommande (12 bytes) :
+- Byte à l'offset 9 : `setpoint = ((0xFF - byte) >> 1) & 0x3F`
 
-By design, the quality of the connector are very poor. They fastly oxydize. I use DEUTSCH connectors, water proof and high quality designed. 
+## Problème résolu : WiFi non réactif
 
-![alt](img/deutsch_connectors.png)
+### Le problème
 
-## Power supply
+Sur ESP8266, **SoftwareSerial désactive TOUTES les interruptions** pendant la réception de chaque byte (~1ms par byte à 9600 baud). Le stack WiFi (qui partage le même CPU) ne peut pas traiter les paquets entrants → ping timeout, OTA impossible, telnet inaccessible.
 
-For the first upload of the program, you will power this up from Micro USB of your computer.
+Paradoxalement, les publications MQTT sortantes fonctionnent (elles sont mises en file d'attente), mais tout ce qui nécessite une **réponse** entrante est bloqué.
 
-Then, It will be powered from the Panel ( black/red +12v).
+### La solution
 
-You'll need a converter from 12v to 5v with minimum of 2A. 
+1. **Lecture non-bloquante** : on ne lit que `PS.available()` bytes, jamais de `readBytes()` bloquant avec timeout.
 
-5V power supply from the converter will supply the MAX485 (GND and vcc), and the ESP8266 (Wemos here) (5v and GND pin).
+2. **Mini-throttle** : on attend au minimum 5 ms entre deux lectures (ou 20+ bytes disponibles) pour accumuler des bytes au lieu de lire un par un.
 
- ## Heat pump Panel to MAX485 interface
+3. **Fenêtre WiFi pendant l'idle bus** : quand le bus est inactif (entre les cycles de trames), on coupe brièvement le RX SoftwareSerial (3 ms) pour laisser le stack WiFi traiter les paquets entrants.
 
-Heat pump panel has 4 wires. 
+```cpp
+if (bus_is_idle && (now - last_wifi_window >= 50)) {
+    PS.enableRx(false);
+    delay(3);  // fenêtre WiFi
+    PS.enableRx(true);
+}
+```
 
-Green and Yellow of the panel go to A and B of the MAX485
+⚠️ **Ne jamais couper le RX pendant une trame active** — sinon on perd des bytes et les trames sont corrompues.
 
+### Détection de l'idle bus
 
- ## MAX485 to Wemos D1 Mini
+Le flag `bus_is_idle` passe à `true` quand :
+- Le buffer résiduel est vide (tous les bursts ont été traités)
+- Il ne reste que des octets `0x01` (séparateurs)
+- Aucune nouvelle donnée depuis > 100 ms (timeout résiduel)
 
- Yellow of the MAX485 goes to RTX of the ESP
- 
- Green of the MAX485 goes to RX of the ESP 
- 
- DE/RE are linked together (you need to do the link), of the MAX485, and goes to pin2 as D4 of the ESP
+## Hardware
 
-# Easy to debug for your case 
+### Composants
+- **Wemos D1 Mini** (ESP8266)
+- **MAX485** — interface RS485
+- **Convertisseur 12V → 5V** (min 2A)
+- Couverture WiFi à l'emplacement de la PAC
+- Boîtier IP67
 
-## Debugging 
+### Câblage
 
-I've struggled a lot to understand HOW to isolate messages from the UART bus.
+#### PAC → MAX485
+Le câble de la PAC a 4 fils :
+- **Vert + Jaune** : bus RS485 → A et B du MAX485
+- **Noir + Rouge** : alimentation 12V
 
-Standard Arduino lib doesn't read break condition.
-Without break condition, it's like reading the matrix and understanding the pattern. I don't have time for that. 
+#### MAX485 → Wemos D1 Mini
 
-So I decided to find a way to isolate message even if I don't have the start or end position. 
+| Broche MAX485 | GPIO Wemos | Pin Wemos | Fonction |
+|---------------|------------|-----------|----------|
+| RO (sortie)   | GPIO4      | D2        | RX données |
+| DI (entrée)   | GPIO5      | D1        | TX données |
+| DE + RE       | GPIO14     | D5        | Contrôle direction |
 
-Reading a lot of documentation, I figured out it's possible to rely on reading timeout to isolated a frame reception. This allowed me to structure permanently the way I receive UART message. 
+⚠️ **NE PAS utiliser GPIO2 (D4)** pour DE/RE — ce pin est HIGH au boot (strapping pin ESP8266), ce qui activerait brièvement le transmetteur et corromprait le bus.
 
-Following that, time to decrypt messages.
+DE/RE sont reliés ensemble et maintenus à **LOW en permanence** (mode réception only).
 
-## Debug functions
+### Alimentation
+- Premier flash : via USB de l'ordinateur
+- En fonctionnement : alimentation 12V de la PAC → convertisseur 12V/5V → Wemos (pin 5V) + MAX485 (VCC)
 
-This project is designed to speed up the exploration process.
+## Installation
 
-You can : 
-* Update on the air (OTA) the Arduino 
-* Live debugging through TCP the program  (*Remote Debugger* - this library is awesome)
-* Adapt the UART communication framing parameter to adapt according your heatpump 
+### Prérequis
+- [PlatformIO](https://platformio.org/platformio-ide) (VSCode ou CLI)
 
-## Remote Debugging 
+### Configuration initiale
 
-For remote debugging : 
 ```bash
-> telnet IP_OF_YOUR_ESP
+# Copier le fichier de secrets
+cp src/secrets.h.sample include/secrets.h
+# Éditer avec vos paramètres WiFi et MQTT
 ```
-![alt](img/debug_start.png)
 
-Switching in VERBOSE mode : 
+Remplir dans `include/secrets.h` :
+- `WIFI_SSID`
+- `WIFI_PASSWORD`
+- `MQTT_BROKER_ADDR`
 
-![alt](img/debug_verbose.png)
+### Compilation et flash
 
-## OTA Update 
+```bash
+# Compiler
+pio run
 
-With PlatformIO + Vscode, you need to knoww the IP of your ESP.
-Then, update your upload process with the TCP protocal and the according IP. 
+# Flash via USB (premier flash)
+pio run -t upload
 
-![alt](img/OTA.png)
-
-Uploading : 
-![alt](img/OTA_success.png)
-
-## MQTT debugging 
-
-I use MQTT explorer to debug my MQTT flows.
-
-Some values : 
-
-![alt](img/mqtt_explorer.png)
-
-## Adapting the Timeout 
-
-You can update on-the-fly the Reading Timeout of UART messages.
-See : 
-* [Serial.Timeout](https://www.arduino.cc/reference/en/language/functions/communication/serial/settimeout/)
-* [Serial.ReadBytes](https://www.arduino.cc/reference/en/language/functions/communication/serial/readbytes/)
-* I use [SoftwareSerial](https://docs.arduino.cc/learn/built-in-libraries/software-serial/) for manipulating Serial
-
-Through MQTT, you can push a unsigned int16 in a RAW message - This is the timeout used by ReadBytes to fill the buffer. Standard is 1000msec - I use 50ms. 
-![alt](img/timeout_config.png)
-
-Once published, you will see in your remotedebug flow : 
-![alt](img/timeout_setting.png)
-
-## Attention
-
-You can totally break the OTA process if you push a bad code or if you overcharge the loop process of the Arduino. 
-
-# Home Assistant integration 
-
-I've chosen to use MQTT for easy integration to Home Assistant. 
-ESP Home didn't allow me to fully customize my exploration process so I didn't use it. 
-
-In your configuration.yml : 
-
+# Flash via OTA (après le premier flash)
+pio run -t upload --upload-port 10.0.0.72
 ```
+
+### Debug à distance
+
+```bash
+telnet <IP_DU_WEMOS>
+```
+
+Utiliser les commandes RemoteDebug pour changer le niveau de log (verbose, debug, info, warning, error).
+
+## Topics MQTT
+
+### Valeurs publiées (lecture)
+
+| Topic | Description | Unité |
+|-------|-------------|-------|
+| `poolheater/values/water_in_temp` | Température eau entrée | °C |
+| `poolheater/values/water_out_temp` | Température eau sortie | °C |
+| `poolheater/values/air_ambient_temp` | Température air ambiant | °C |
+| `poolheater/values/coil_temp` | Température serpentin | °C |
+| `poolheater/values/gaz_temp` | Température gaz | °C |
+| `poolheater/values/active_status` | PAC allumée | 0/1 |
+| `poolheater/values/heating` | Compresseur actif | 0/1 |
+| `poolheater/values/setpoint` | Consigne demandée (télécommande) | °C |
+| `poolheater/values/setpoint_confirmed` | Consigne confirmée (PAC) | °C |
+| `poolheater/status` | État connexion (retained) | ON |
+
+### Commandes (écriture)
+
+| Topic | Description |
+|-------|-------------|
+| `poolheater/command/probe` | Déclenche un test d'émission TX (expérimental) |
+
+### Stratégie de publication
+- Publication sur **changement de valeur** (pas de flood)
+- **Republication complète toutes les 60 secondes** pour garantir la fraîcheur dans HA
+- Reconnexion MQTT throttlée à 5 secondes entre les tentatives
+
+## Intégration Home Assistant
+
+Dans votre `configuration.yaml` :
+
+```yaml
 mqtt:
-  
-  sensor: 
-
-    - name: "Pool water tempetature"
+  sensor:
+    - name: "Pool water temperature"
       state_topic: "poolheater/values/water_in_temp"
       force_update: true
       unit_of_measurement: "°C"
+      unique_id: "pool_hp_water_in_temp"
+      device_class: "temperature"
 
-    - name: "Pool water OUT tempetature"
+    - name: "Pool water OUT temperature"
       state_topic: "poolheater/values/water_out_temp"
       force_update: true
       unit_of_measurement: "°C"
+      unique_id: "pool_hp_water_out_temp"
+      device_class: "temperature"
 
     - name: "Heat pump status"
       state_topic: "poolheater/values/active_status"
       force_update: true
-      
+      unique_id: "pool_hp_status"
+
+    - name: "Heat pump heating"
+      state_topic: "poolheater/values/heating"
+      force_update: true
+      unique_id: "pool_hp_heating"
+
     - name: "Heat pump ambient air temperature"
       state_topic: "poolheater/values/air_ambient_temp"
       force_update: true
+      unit_of_measurement: "°C"
+      unique_id: "pool_hp_air_temp"
+      device_class: "temperature"
 
-    - name: "Heat pump gaz temperature"
+    - name: "Heat pump gas temperature"
       state_topic: "poolheater/values/gaz_temp"
       force_update: true
+      unit_of_measurement: "°C"
+      unique_id: "pool_hp_gas_temp"
+      device_class: "temperature"
 
     - name: "Heat pump coil temperature"
       state_topic: "poolheater/values/coil_temp"
       force_update: true
-```
+      unit_of_measurement: "°C"
+      unique_id: "pool_hp_coil_temp"
+      device_class: "temperature"
 
-Results : 
+    - name: "Heat pump setpoint"
+      state_topic: "poolheater/values/setpoint"
+      force_update: true
+      unit_of_measurement: "°C"
+      unique_id: "pool_hp_setpoint"
+      device_class: "temperature"
+
+    - name: "Heat pump setpoint confirmed"
+      state_topic: "poolheater/values/setpoint_confirmed"
+      force_update: true
+      unit_of_measurement: "°C"
+      unique_id: "pool_hp_setpoint_confirmed"
+      device_class: "temperature"
+```
 
 ![alt](img/HA_integration.png)
 
-## Contributing
+## Fichiers de log de trames
 
-Pull requests are welcome. For major changes, please open an issue first
-to discuss what you would like to change.
+Le répertoire `src/frame_logs/` contient des captures brutes du bus UART pour le reverse-engineering :
+- Captures avec télécommande + PAC (trames 12-36 B)
+- `motherboard_only.txt` : PAC seule sans télécommande (trames 93 B commençant par `0x0C`)
 
-Please make sure to update tests as appropriate.
+## Références
 
-## License
+- Point de départ : [esp8266_poolstar](https://github.com/cribskip/esp8266_poolstar)
+- Discussion protocole : [issue Cyril](https://github.com/cribskip/esp8266_poolstar/issues/2)
+- [Version Python](https://github.com/cyrilpawelko/poolstarmon/tree/main/micropython)
+- [Thread Modbus Jeedom](https://community.jeedom.com/t/domotiser-pac-inverter-de-piscine-irrijardin-warmpool-aide-connection-rs485/42440/77?page=5)
+- Reverse Hayward : [Forum Arduino](https://forum.arduino.cc/t/resolu-reverse-engineering-protocole-thermopompe-hayward/249705)
+- Reverse Poolex Dreamline : [Repository](https://github.com/CDX-24/PoolexDreamlineController/tree/main)
+
+## Contribuer
+
+Les pull requests sont les bienvenues. Pour les changements majeurs, ouvrez d'abord une issue.
+
+## Licence
 
 [MIT](https://choosealicense.com/licenses/mit/)
