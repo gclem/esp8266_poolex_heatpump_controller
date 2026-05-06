@@ -62,10 +62,12 @@ RemoteDebug Debug;
 volatile bool probe_pending = false;
 static uint8_t probe_counter = 0x01;
 
-// MQTT rate limiting — ne publie que si la valeur a changé
+// MQTT rate limiting — ne publie que si la valeur a changé OU toutes les 60s
 static int last_water_in = -1, last_water_out = -1, last_air = -1;
 static int last_coil = -1, last_gas = -1, last_power = -1, last_heating = -1;
 static int last_setpoint = -1, last_setpoint_confirmed = -1;
+static unsigned long last_full_publish_ms = 0;
+const unsigned long MQTT_FULL_PUBLISH_INTERVAL_MS = 60000; // republish toutes les 60s
 
 // MQTT reconnect throttle
 static unsigned long mqtt_last_attempt = 0;
@@ -79,6 +81,7 @@ const char *MQTT_TOPIC_VALUES_AIR_AMBIENT_TEMP = "poolheater/values/air_ambient_
 const char *MQTT_TOPIC_VALUES_COIL_TEMP = "poolheater/values/coil_temp";
 const char *MQTT_TOPIC_VALUES_GAZ_TEMP = "poolheater/values/gaz_temp";
 const char *MQTT_TOPIC_VALUES_ACTIVE_STATUS = "poolheater/values/active_status";
+const char *MQTT_TOPIC_VALUES_HEATING = "poolheater/values/heating";
 const char *MQTT_TOPIC_VALUES_SETPOINT = "poolheater/values/setpoint";
 const char *MQTT_TOPIC_VALUES_SETPOINT_CONFIRMED = "poolheater/values/setpoint_confirmed";
 // Partie état/config (burst long sans les 9B capteurs) — pour analyse future
@@ -362,8 +365,9 @@ void processBurst(const uint8_t *burst, int len)
     debugD("Remote HB  : setpoint=%d°C (confirmed=%d°C) power_cmd=%d",
            setpoint_requested, setpoint_confirmed, power_cmd);
     debugV("Remote HB raw: %s", hexDumpFast(burst, len));
-    if (setpoint_requested != last_setpoint)           { pushMQTTValue(MQTT_TOPIC_VALUES_SETPOINT, setpoint_requested);           last_setpoint = setpoint_requested; }
-    if (setpoint_confirmed != last_setpoint_confirmed) { pushMQTTValue(MQTT_TOPIC_VALUES_SETPOINT_CONFIRMED, setpoint_confirmed); last_setpoint_confirmed = setpoint_confirmed; }
+    bool force = (millis() - last_full_publish_ms) > MQTT_FULL_PUBLISH_INTERVAL_MS;
+    if (force || setpoint_requested != last_setpoint)           { pushMQTTValue(MQTT_TOPIC_VALUES_SETPOINT, setpoint_requested);           last_setpoint = setpoint_requested; }
+    if (force || setpoint_confirmed != last_setpoint_confirmed) { pushMQTTValue(MQTT_TOPIC_VALUES_SETPOINT_CONFIRMED, setpoint_confirmed); last_setpoint_confirmed = setpoint_confirmed; }
     return;
   }
 
@@ -464,14 +468,17 @@ bool decodeSensorTail(const uint8_t *tail)
   debugD("Sensor     : water_in=%d°C water_out=%d°C air=%d°C coil=%d°C gas=%d°C power=%d heating=%d",
          water_in, water_out, air_ambient, coil_temp, gas_temp, power_on, heating);
 
-  // Ne publie sur MQTT que si la valeur a changé
-  if (water_in != last_water_in)    { pushMQTTValue(MQTT_TOPIC_VALUES_WATER_IN_TEMP,    water_in);    last_water_in = water_in; }
-  if (water_out != last_water_out)  { pushMQTTValue(MQTT_TOPIC_VALUES_WATER_OUT_TEMP,   water_out);   last_water_out = water_out; }
-  if (air_ambient != last_air)      { pushMQTTValue(MQTT_TOPIC_VALUES_AIR_AMBIENT_TEMP, air_ambient); last_air = air_ambient; }
-  if (coil_temp != last_coil)       { pushMQTTValue(MQTT_TOPIC_VALUES_COIL_TEMP,        coil_temp);   last_coil = coil_temp; }
-  if (gas_temp != last_gas)         { pushMQTTValue(MQTT_TOPIC_VALUES_GAZ_TEMP,         gas_temp);    last_gas = gas_temp; }
-  if (power_on != last_power)       { pushMQTTValue(MQTT_TOPIC_VALUES_ACTIVE_STATUS,    power_on);    last_power = power_on; }
-  if (heating != last_heating)      { pushMQTTValue(MQTT_TOPIC_VALUES_ACTIVE_STATUS,    heating);     last_heating = heating; }
+  // Force republish toutes les 60s même si les valeurs n'ont pas changé
+  bool force = (millis() - last_full_publish_ms) > MQTT_FULL_PUBLISH_INTERVAL_MS;
+  if (force) last_full_publish_ms = millis();
+
+  if (force || water_in != last_water_in)    { pushMQTTValue(MQTT_TOPIC_VALUES_WATER_IN_TEMP,    water_in);    last_water_in = water_in; }
+  if (force || water_out != last_water_out)  { pushMQTTValue(MQTT_TOPIC_VALUES_WATER_OUT_TEMP,   water_out);   last_water_out = water_out; }
+  if (force || air_ambient != last_air)      { pushMQTTValue(MQTT_TOPIC_VALUES_AIR_AMBIENT_TEMP, air_ambient); last_air = air_ambient; }
+  if (force || coil_temp != last_coil)       { pushMQTTValue(MQTT_TOPIC_VALUES_COIL_TEMP,        coil_temp);   last_coil = coil_temp; }
+  if (force || gas_temp != last_gas)         { pushMQTTValue(MQTT_TOPIC_VALUES_GAZ_TEMP,         gas_temp);    last_gas = gas_temp; }
+  if (force || power_on != last_power)       { pushMQTTValue(MQTT_TOPIC_VALUES_ACTIVE_STATUS,    power_on);    last_power = power_on; }
+  if (force || heating != last_heating)      { pushMQTTValue(MQTT_TOPIC_VALUES_HEATING,          heating);     last_heating = heating; }
   return true;
 }
 
