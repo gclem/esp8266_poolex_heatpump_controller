@@ -312,6 +312,107 @@ mqtt:
 
 ![alt](img/HA_integration.png)
 
+## Calcul d'efficience (COP et puissance thermique)
+
+Pour visualiser l'efficience de la PAC dans Home Assistant, on utilise des **template sensors** qui calculent :
+- **Delta T** : différence entre water_out et water_in (°C)
+- **Puissance thermique** : P = débit × ΔT × 1.163 (kW)
+- **COP estimé** : basé sur la courbe constructeur Poolex Jetline 90 en fonction de la température air
+
+### Configuration Home Assistant
+
+Ajouter dans `configuration.yaml` :
+
+```yaml
+# --- Input number pour le débit PAC ---
+input_number:
+  pool_hp_flow_rate:
+    name: "Débit PAC (m³/h)"
+    min: 1
+    max: 6
+    step: 0.1
+    initial: 3
+    unit_of_measurement: "m³/h"
+    icon: mdi:water-pump
+
+# --- Template sensors pour l'efficience ---
+template:
+  - sensor:
+      - name: "Pool HP Delta T"
+        unique_id: "pool_hp_delta_t"
+        unit_of_measurement: "°C"
+        device_class: "temperature"
+        state: >
+          {% set t_out = states('sensor.pool_water_out_tempetature') | float(0) %}
+          {% set t_in = states('sensor.pool_water_tempetature') | float(0) %}
+          {% if t_out > 0 and t_in > 0 %}
+            {{ (t_out - t_in) | round(1) }}
+          {% else %}
+            unknown
+          {% endif %}
+
+      - name: "Pool HP Puissance thermique"
+        unique_id: "pool_hp_thermal_power"
+        unit_of_measurement: "kW"
+        device_class: "power"
+        state: >
+          {% set t_out = states('sensor.pool_water_out_tempetature') | float(0) %}
+          {% set t_in = states('sensor.pool_water_tempetature') | float(0) %}
+          {% set flow = states('input_number.pool_hp_flow_rate') | float(3) %}
+          {% set delta = t_out - t_in %}
+          {% if t_out > 0 and t_in > 0 and delta >= 0 %}
+            {{ (flow * delta * 1.163) | round(2) }}
+          {% else %}
+            0
+          {% endif %}
+
+      - name: "Pool HP COP estimé"
+        unique_id: "pool_hp_cop_estimated"
+        unit_of_measurement: "COP"
+        icon: mdi:lightning-bolt-circle
+        state: >
+          {# COP estimé Poolex Jetline 90 selon température air #}
+          {# Courbe constructeur approximée : COP ≈ 3.0 + (T_air - 15) × 0.15 #}
+          {# Plafonné entre 2.5 et 7.0 #}
+          {% set t_air = states('sensor.heat_pump_ambient_air_temperature') | float(0) %}
+          {% set heating = states('sensor.heat_pump_status') | int(0) %}
+          {% if heating == 1 and t_air > 0 %}
+            {% set cop = 3.0 + (t_air - 15) * 0.15 %}
+            {{ [2.5, [cop, 7.0] | min] | max | round(1) }}
+          {% else %}
+            unknown
+          {% endif %}
+
+      - name: "Pool HP Puissance électrique estimée"
+        unique_id: "pool_hp_electrical_power"
+        unit_of_measurement: "kW"
+        device_class: "power"
+        state: >
+          {% set thermal = states('sensor.pool_hp_puissance_thermique') | float(0) %}
+          {% set cop = states('sensor.pool_hp_cop_estime') | float(0) %}
+          {% if cop > 0 and thermal > 0 %}
+            {{ (thermal / cop) | round(2) }}
+          {% else %}
+            0
+          {% endif %}
+```
+
+### Notes sur le COP
+
+La courbe COP est **approximée** à partir des données constructeur de la Jetline Selection 90 :
+
+| Temp. air | COP estimé | Puissance thermique |
+|-----------|-----------|-------------------|
+| 10°C | ~2.3 | ~5.5 kW |
+| 15°C | ~3.0 | ~7.0 kW |
+| 20°C | ~3.8 | ~8.5 kW |
+| 26°C | ~4.6 | ~9.5 kW |
+| 30°C | ~5.3 | ~10 kW |
+
+> ⚠️ Le COP réel dépend aussi de la température de l'eau et de l'humidité. Pour un COP précis, il faudrait un compteur électrique (type Shelly 1PM) sur l'alimentation de la PAC.
+
+> 💡 **Débit PAC** : Ajustez `input_number.pool_hp_flow_rate` selon votre installation. La Poolex Jetline 90 recommande 1.5–3.5 m³/h à travers l'échangeur (pas le débit total de la pompe de filtration).
+
 ## Fichiers de log de trames
 
 Le répertoire `src/frame_logs/` contient des captures brutes du bus UART pour le reverse-engineering :
