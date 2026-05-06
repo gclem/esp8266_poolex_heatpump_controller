@@ -79,8 +79,22 @@ La validation se fait par plage de température (5–45 °C) — pas d'en-tête 
 
 ### Consigne (setpoint)
 
-La consigne est extraite du heartbeat de la télécommande (12 bytes) :
-- Byte à l'offset 9 : `setpoint = ((0xFF - byte) >> 1) & 0x3F`
+La consigne est extraite de deux sources :
+- **Télécommande** (heartbeat 12B) : byte offset 9 → `setpoint = ((0xFF - byte) >> 1) & 0x3F`
+- **PAC** (trame d'état longue ≥15B) : byte offset 2 (ou 3 si préfixe FF) → `setpoint_confirmed = ((0xFF - byte) >> 3) & 0x3F`
+
+### Mode de fonctionnement
+
+Le **dernier byte** des trames d'état longues (≥15B avant le sensor tail) encode le mode :
+
+| Byte | Mode | Valeur MQTT |
+|------|------|-------------|
+| `0x6C` | Chauffage seul | `heat` |
+| `0x64` | Chauffage (variante) | `heat` |
+| `0x54` | Automatique (chaud + froid) | `auto` |
+| `0x5C` | Refroidissement seul | `cool` |
+
+> ⚠️ Ces valeurs sont issues de l'analyse d'une capture. `0x64` apparaît lors de transitions ou après un power cycle — il est provisoirement mappé sur `heat`.
 
 ## Problème résolu : WiFi non réactif
 
@@ -201,6 +215,8 @@ Utiliser les commandes RemoteDebug pour changer le niveau de log (verbose, debug
 | `poolheater/values/heating` | Compresseur actif | 0/1 |
 | `poolheater/values/setpoint` | Consigne demandée (télécommande) | °C |
 | `poolheater/values/setpoint_confirmed` | Consigne confirmée (PAC) | °C |
+| `poolheater/values/mode` | Mode de fonctionnement | `heat` / `auto` / `cool` |
+| `poolheater/values/state_raw` | Trame d'état brute (hex) | Pour analyse |
 | `poolheater/status` | État connexion (retained) | ON |
 
 ### Commandes (écriture)
@@ -279,7 +295,20 @@ mqtt:
       unit_of_measurement: "°C"
       unique_id: "pool_hp_setpoint_confirmed"
       device_class: "temperature"
+
+    - name: "Heat pump mode"
+      state_topic: "poolheater/values/mode"
+      force_update: true
+      unique_id: "pool_hp_mode"
 ```
+
+### Valeurs du mode
+
+| Valeur MQTT | Mode | Description |
+|-------------|------|-------------|
+| `heat` | Chauffage seul | Mode 2 — la PAC chauffe uniquement |
+| `auto` | Automatique | Mode 1 — chauffage + refroidissement |
+| `cool` | Refroidissement seul | Mode 0 — la PAC refroidit uniquement |
 
 ![alt](img/HA_integration.png)
 
