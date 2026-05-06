@@ -66,6 +66,7 @@ static uint8_t probe_counter = 0x01;
 static int last_water_in = -1, last_water_out = -1, last_air = -1;
 static int last_coil = -1, last_gas = -1, last_power = -1, last_heating = -1;
 static int last_setpoint = -1, last_setpoint_confirmed = -1;
+static int last_mode = -1;
 static unsigned long last_full_publish_ms = 0;
 const unsigned long MQTT_FULL_PUBLISH_INTERVAL_MS = 60000; // republish toutes les 60s
 
@@ -84,6 +85,7 @@ const char *MQTT_TOPIC_VALUES_ACTIVE_STATUS = "poolheater/values/active_status";
 const char *MQTT_TOPIC_VALUES_HEATING = "poolheater/values/heating";
 const char *MQTT_TOPIC_VALUES_SETPOINT = "poolheater/values/setpoint";
 const char *MQTT_TOPIC_VALUES_SETPOINT_CONFIRMED = "poolheater/values/setpoint_confirmed";
+const char *MQTT_TOPIC_VALUES_MODE = "poolheater/values/mode";
 // Partie état/config (burst long sans les 9B capteurs) — pour analyse future
 const char *MQTT_TOPIC_VALUES_STATE_RAW = "poolheater/values/state_raw";
 // MQTT COMMANDS
@@ -404,11 +406,52 @@ void processBurst(const uint8_t *burst, int len)
         debugV("Sensor INVALID: %s", hexDumpFast(burst + sensor_start, SENSOR_TAIL_LEN));
 
       // La partie avant = flags + état/config machine
-      // Publier en hex sur MQTT pour analyse des modes (chauffe/froid/auto)
       if (sensor_start > 0)
       {
         debugV("State      (%2dB): %s", sensor_start, hexDumpFast(burst, sensor_start));
         pushMQTTMessage(MQTT_TOPIC_VALUES_STATE_RAW, hexDumpFast(burst, sensor_start));
+
+        // Décodage du mode PAC (dernier byte de la partie état, trames longues ≥15B)
+        if (sensor_start >= 15)
+        {
+          uint8_t mode_byte = burst[sensor_start - 1];
+          int mode = -1;
+          switch (mode_byte) {
+            case 0x6C: mode = 2; break; // Chauffage seul
+            case 0x64: mode = 2; break; // Chauffage (variante transition)
+            case 0x54: mode = 1; break; // Auto (chaud + froid)
+            case 0x5C: mode = 0; break; // Refroidissement seul
+          }
+          if (mode >= 0)
+          {
+            bool force = (millis() - last_full_publish_ms) > MQTT_FULL_PUBLISH_INTERVAL_MS;
+            if (force || mode != last_mode)
+            {
+              const char *mode_str = (mode == 2) ? "heat" : (mode == 1) ? "auto" : "cool";
+              pushMQTTMessage(MQTT_TOPIC_VALUES_MODE, mode_str);
+              last_mode = mode;
+              debugD("Mode PAC: %s (byte=0x%02X)", mode_str, mode_byte);
+            }
+          }
+
+          // Consigne confirmée par la PAC : byte[2] du state (quand burst commence par 00/80)
+          // Formule identique à water_in : ((0xFF - x) >> 3) & 0x3F
+          int sp_offset = (burst[0] == FRAME_SYNC_BYTE) ? 3 : 2;
+          if (sp_offset < sensor_start)
+          {
+            int sp_confirmed = ((0xFF - burst[sp_offset]) >> 3) & 0x3F;
+            if (sp_confirmed >= 15 && sp_confirmed <= 40)
+            {
+              bool force2 = (millis() - last_full_publish_ms) > MQTT_FULL_PUBLISH_INTERVAL_MS;
+              if (force2 || sp_confirmed != last_setpoint_confirmed)
+              {
+                pushMQTTValue(MQTT_TOPIC_VALUES_SETPOINT_CONFIRMED, sp_confirmed);
+                last_setpoint_confirmed = sp_confirmed;
+                debugD("Setpoint confirmed (PAC): %d°C", sp_confirmed);
+              }
+            }
+          }
+        }
       }
     }
     else
@@ -461,7 +504,33 @@ void processBurst(const uint8_t *burst, int len)
         // Burst sans terminaison FF FF — état machine (mode erreur ou config)
         debugV("PAC-state  (%2dB): %s", len, hexDumpFast(burst, len));
         if (len >= 10) // assez de données pour être intéressant
+        {
           pushMQTTMessage(MQTT_TOPIC_VALUES_STATE_RAW, hexDumpFast(burst, len));
+
+          // Décodage du mode PAC sur trames d'état longues (≥15B)
+          if (len >= 15)
+          {
+            uint8_t mode_byte = burst[len - 1];
+            int mode = -1;
+            switch (mode_byte) {
+              case 0x6C: mode = 2; break; // Chauffage seul
+              case 0x64: mode = 2; break; // Chauffage (variante transition)
+              case 0x54: mode = 1; break; // Auto (chaud + froid)
+              case 0x5C: mode = 0; break; // Refroidissement seul
+            }
+            if (mode >= 0)
+            {
+              bool force = (millis() - last_full_publish_ms) > MQTT_FULL_PUBLISH_INTERVAL_MS;
+              if (force || mode != last_mode)
+              {
+                const char *mode_str = (mode == 2) ? "heat" : (mode == 1) ? "auto" : "cool";
+                pushMQTTMessage(MQTT_TOPIC_VALUES_MODE, mode_str);
+                last_mode = mode;
+                debugD("Mode PAC: %s (byte=0x%02X)", mode_str, mode_byte);
+              }
+            }
+          }
+        }
       }
     }
     return;
