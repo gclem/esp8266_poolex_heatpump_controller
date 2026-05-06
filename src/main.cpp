@@ -543,7 +543,21 @@ void processBurst(const uint8_t *burst, int len)
   // Trame courte (flags isolés, 0x40 flooding en mode erreur)
   if (len <= 4)
   {
-    debugV("Short(%dB)  : %s", len, hexDumpFast(burst, len));
+    // Si c'est un burst de 0x40, c'est un signal d'erreur PAC
+    if (burst[0] == 0x40)
+    {
+      last_error_seen_ms = millis();
+      if (last_error != "PL")
+      {
+        pushMQTTMessage(MQTT_TOPIC_VALUES_ERROR, "PL");
+        last_error = "PL";
+        debugD("Error PAC: PL (short 0x40 burst)");
+      }
+    }
+    else
+    {
+      debugV("Short(%dB)  : %s", len, hexDumpFast(burst, len));
+    }
     return;
   }
 
@@ -589,12 +603,52 @@ void processBurst(const uint8_t *burst, int len)
     }
   }
 
-  // Sensor tail isolé (9B, terminé FF FF, sans flag en tête)
-  if (len == SENSOR_TAIL_LEN && burst[len - 1] == 0xFF && burst[len - 2] == 0xFF && burst[len - 4] == 0xFF)
+  // Sensor tail isolé (9B en mode erreur: 5 temps + status + status2 + FF FF)
+  // Ex: 54 E9 D1 C3 D9 FD EB FF FF — burst[5] n'est PAS 0xFF en mode erreur
+  if (len == SENSOR_TAIL_LEN && burst[len - 1] == 0xFF && burst[len - 2] == 0xFF)
   {
-    if (!decodeSensorTail(burst))
-      debugV("SensorIso INVALID: %s", hexDumpFast(burst, len));
-    return;
+    int water_in  = ((0xFF - burst[0]) >> 3) & 0x3F;
+    int water_out = ((0xFF - burst[4]) >> 1) & 0x3F;
+    if (water_in >= SENSOR_TEMP_MIN && water_in <= SENSOR_TEMP_MAX &&
+        water_out >= SENSOR_TEMP_MIN && water_out <= SENSOR_TEMP_MAX)
+    {
+      int air_ambient = ((0xFF - burst[1]) >> 1) & 0x3F;
+      int coil_temp   = ((0xFF - burst[2]) >> 1) & 0x3F;
+      int gas_temp    = ((0xFF - burst[3]) >> 1) & 0x3F;
+      // bytes 5-6 = status (FD=off? EB=?), en mode erreur power=0
+      int power_on = (burst[5] == 0xFF) ? (((0xFF - burst[6]) >> 4) & 0x01) : 0;
+      int heating  = 0;
+
+      debugD("Sensor(9B) : water_in=%d°C water_out=%d°C air=%d°C coil=%d°C gas=%d°C power=%d",
+             water_in, water_out, air_ambient, coil_temp, gas_temp, power_on);
+
+      bool force = (millis() - last_full_publish_ms) > MQTT_FULL_PUBLISH_INTERVAL_MS;
+      if (force) last_full_publish_ms = millis();
+      if (force || water_in != last_water_in)    { pushMQTTValue(MQTT_TOPIC_VALUES_WATER_IN_TEMP, water_in);     last_water_in = water_in; }
+      if (force || water_out != last_water_out)  { pushMQTTValue(MQTT_TOPIC_VALUES_WATER_OUT_TEMP, water_out);   last_water_out = water_out; }
+      if (force || air_ambient != last_air)      { pushMQTTValue(MQTT_TOPIC_VALUES_AIR_AMBIENT_TEMP, air_ambient); last_air = air_ambient; }
+      if (force || coil_temp != last_coil)       { pushMQTTValue(MQTT_TOPIC_VALUES_COIL_TEMP, coil_temp);         last_coil = coil_temp; }
+      if (force || gas_temp != last_gas)         { pushMQTTValue(MQTT_TOPIC_VALUES_GAZ_TEMP, gas_temp);           last_gas = gas_temp; }
+      if (force || power_on != last_power)       { pushMQTTValue(MQTT_TOPIC_VALUES_ACTIVE_STATUS, power_on);      last_power = power_on; }
+      if (force || heating != last_heating)      { pushMQTTValue(MQTT_TOPIC_VALUES_HEATING, heating);             last_heating = heating; }
+
+      // Clear error si power revient
+      if (power_on == 1 && last_error != "none" &&
+          (millis() - last_error_seen_ms) > ERROR_CLEAR_DELAY_MS)
+      {
+        pushMQTTMessage(MQTT_TOPIC_VALUES_ERROR, "none");
+        last_error = "none";
+        debugD("Error PAC: cleared (no 0x40 for 10s + power ON)");
+      }
+      return;
+    }
+    // Si validation échoue, tenter le décodage normal (burst[5]==FF)
+    if (burst[len - 4] == 0xFF)
+    {
+      if (!decodeSensorTail(burst))
+        debugV("SensorIso INVALID: %s", hexDumpFast(burst, len));
+      return;
+    }
   }
 
   // Trame non reconnue — rate-limited pour ne pas saturer
