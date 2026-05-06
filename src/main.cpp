@@ -178,8 +178,22 @@ void setup()
   Serial.println("UART Protocol is listening...");
 }
 
+// Flag indiquant que le bus est en idle (dernier traitement a fini sur des 0x01)
+static bool bus_is_idle = false;
+
 void loop()
 {
+  // Donner du temps au WiFi quand le bus est en idle (entre les trames).
+  // On ne coupe JAMAIS le RX en plein milieu d'une trame.
+  static unsigned long last_wifi_window = 0;
+  unsigned long now = millis();
+  if (bus_is_idle && (now - last_wifi_window >= 50))
+  {
+    last_wifi_window = now;
+    PS.enableRx(false);
+    delay(3); // 3ms WiFi window pendant l'idle bus
+    PS.enableRx(true);
+  }
 
   Debug.handle();
   ArduinoOTA.handle();
@@ -236,10 +250,10 @@ void sniffing()
   const int READ_SIZE = 250;
   uint8_t buf[READ_SIZE];
 
-  // Laisser le WiFi respirer : ne traiter le bus que toutes les 20ms max
+  // Mini-throttle : lire au minimum toutes les 5ms pour accumuler des bytes
+  // (~5 bytes à 9600 baud) au lieu de lire byte par byte
   static unsigned long last_read_ms = 0;
   unsigned long now = millis();
-  if (now - last_read_ms < 20) return;
 
   int avail = PS.available();
   if (avail <= 0)
@@ -251,10 +265,15 @@ void sniffing()
         processBurst(residual, residual_len);
       residual_len = 0;
     }
+    bus_is_idle = (residual_len == 0);
     return;
   }
 
+  // Ne lire que si au moins 5ms écoulées OU buffer > 20 bytes
+  if (avail < 20 && (now - last_read_ms) < 5) return;
+
   last_read_ms = now;
+  bus_is_idle = false;
   residual_last_activity = now;
 
   // Lire uniquement ce qui est disponible — ne jamais bloquer
@@ -306,6 +325,9 @@ void sniffing()
       memmove(residual, residual + last_processed, residual_len);
   }
 
+  // Le bus est idle si on a fini de traiter tout le residual (que des 0x01 restants ou vide)
+  bus_is_idle = (residual_len == 0);
+
   // Sécurité : si le buffer déborde sans aucun idle byte, on le vide sans traiter
   if (residual_len >= (int)sizeof(residual) - READ_SIZE)
   {
@@ -324,14 +346,19 @@ static int unknown_count_since_log = 0;
 void processBurst(const uint8_t *burst, int len)
 {
   // Heartbeat télécommande → PAC : XX [04|0C] FF ... (12B)
+  // Parfois le premier byte (counter) est perdu → 11B avec burst[0]=[04|0C]
   // byte[1]: 0x04=normal, 0x0C=commande power en cours
   // byte[4] = consigne demandée: (0xFF - x) >> 1 = °C
   // byte[3] = consigne confirmée PAC: même formule
-  if (len == 12 && (burst[1] == 0x04 || burst[1] == 0x0C) && burst[2] == 0xFF)
+  bool is_hb_12 = (len == 12 && (burst[1] == 0x04 || burst[1] == 0x0C) && burst[2] == 0xFF);
+  bool is_hb_11 = (len == 11 && (burst[0] == 0x04 || burst[0] == 0x0C) && burst[1] == 0xFF);
+
+  if (is_hb_12 || is_hb_11)
   {
-    int setpoint_requested  = ((0xFF - burst[4]) >> 1) & 0x3F;
-    int setpoint_confirmed  = ((0xFF - burst[3]) >> 1) & 0x3F;
-    bool power_cmd = (burst[1] == 0x0C);
+    int offset = is_hb_11 ? -1 : 0; // décalage si counter manquant
+    int setpoint_requested  = ((0xFF - burst[4 + offset]) >> 1) & 0x3F;
+    int setpoint_confirmed  = ((0xFF - burst[3 + offset]) >> 1) & 0x3F;
+    bool power_cmd = (burst[1 + offset] == 0x0C);
     debugD("Remote HB  : setpoint=%d°C (confirmed=%d°C) power_cmd=%d",
            setpoint_requested, setpoint_confirmed, power_cmd);
     debugV("Remote HB raw: %s", hexDumpFast(burst, len));
@@ -340,9 +367,15 @@ void processBurst(const uint8_t *burst, int len)
     return;
   }
 
-  // ACK PAC → télécommande : [FD|FF] F1 FF D5 ... (13B)
-  // byte[0] varie (FD ou FF selon timing), on identifie par len + bytes[1,3]
-  if (len == 13 && burst[1] == 0xF1 && burst[3] == 0xD5)
+  // ACK PAC → télécommande : contient F1 xx D5 et tout le reste est FF
+  // Taille variable (8-13B) car parfois tronqué par le timing de lecture
+  if (len >= 7 && len <= 13 && burst[1] == 0xF1 && burst[3] == 0xD5)
+  {
+    debugV("PAC ACK    : %s", hexDumpFast(burst, len));
+    return;
+  }
+  // Variante tronquée : commence directement par F1
+  if (len >= 6 && len <= 13 && burst[0] == 0xF1 && burst[2] == 0xD5)
   {
     debugV("PAC ACK    : %s", hexDumpFast(burst, len));
     return;
