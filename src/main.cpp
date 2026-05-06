@@ -403,9 +403,13 @@ void processBurst(const uint8_t *burst, int len)
       if (!decodeSensorTail(burst + sensor_start))
         debugV("Sensor INVALID: %s", hexDumpFast(burst + sensor_start, SENSOR_TAIL_LEN));
 
-      // La partie avant = flags + état/config machine (pour analyse future)
+      // La partie avant = flags + état/config machine
+      // Publier en hex sur MQTT pour analyse des modes (chauffe/froid/auto)
       if (sensor_start > 0)
+      {
         debugV("State      (%2dB): %s", sensor_start, hexDumpFast(burst, sensor_start));
+        pushMQTTMessage(MQTT_TOPIC_VALUES_STATE_RAW, hexDumpFast(burst, sensor_start));
+      }
     }
     else
     {
@@ -454,8 +458,10 @@ void processBurst(const uint8_t *burst, int len)
       }
       else
       {
-        // Burst sans terminaison FF FF — état machine en mode erreur
+        // Burst sans terminaison FF FF — état machine (mode erreur ou config)
         debugV("PAC-state  (%2dB): %s", len, hexDumpFast(burst, len));
+        if (len >= 10) // assez de données pour être intéressant
+          pushMQTTMessage(MQTT_TOPIC_VALUES_STATE_RAW, hexDumpFast(burst, len));
       }
     }
     return;
