@@ -97,6 +97,7 @@ bool decodeSensorTail(const uint8_t *tail);
 void sendProbeHB();
 const char* hexDumpFast(const uint8_t *buf, int len);
 void connectToMQTTBroker();
+void publishHADiscovery();
 void pushMQTTMessage(const char *topic, const char *message);
 void pushMQTTValue(const char *topic, int value);
 void mqttReceiveCallback(char *topic, byte *payload, unsigned int length);
@@ -172,7 +173,7 @@ void setup()
   // Init MQTT
   pubsubClient.setServer(MQTT_BROKER_ADDR, 1883);
   pubsubClient.setCallback(mqttReceiveCallback);
-  pubsubClient.setBufferSize(512);
+  pubsubClient.setBufferSize(600);
   connectToMQTTBroker();
 
   // Init UART Protocol
@@ -539,6 +540,9 @@ void connectToMQTTBroker()
       Debug.println("Connected to MQTT broker.");
       pubsubClient.publish(MQTT_TOPIC_STATUS, "ON", true);
       pubsubClient.subscribe(MQTT_TOPIC_COMMAND_PROBE);
+      publishHADiscovery();
+      // Force republish immédiat des valeurs au prochain cycle
+      last_full_publish_ms = 0;
     }
     else
     {
@@ -547,6 +551,64 @@ void connectToMQTTBroker()
       Debug.println(" — retrying in 5s");
     }
   }
+}
+
+// Publie les messages de discovery MQTT pour Home Assistant.
+// HA détecte automatiquement les entités via homeassistant/sensor/...
+void publishHADiscovery()
+{
+  struct SensorDef {
+    const char *id;
+    const char *name;
+    const char *topic;
+    const char *unit;
+    const char *dev_class;
+  };
+
+  SensorDef sensors[] = {
+    {"water_in_temp",    "PAC Water In",        MQTT_TOPIC_VALUES_WATER_IN_TEMP,    "°C", "temperature"},
+    {"water_out_temp",   "PAC Water Out",       MQTT_TOPIC_VALUES_WATER_OUT_TEMP,   "°C", "temperature"},
+    {"air_ambient_temp", "PAC Air Ambient",     MQTT_TOPIC_VALUES_AIR_AMBIENT_TEMP, "°C", "temperature"},
+    {"coil_temp",        "PAC Coil",            MQTT_TOPIC_VALUES_COIL_TEMP,        "°C", "temperature"},
+    {"gaz_temp",         "PAC Gas",             MQTT_TOPIC_VALUES_GAZ_TEMP,         "°C", "temperature"},
+    {"setpoint",         "PAC Setpoint",        MQTT_TOPIC_VALUES_SETPOINT,         "°C", "temperature"},
+    {"setpoint_confirmed", "PAC Setpoint Confirmed", MQTT_TOPIC_VALUES_SETPOINT_CONFIRMED, "°C", "temperature"},
+    {"active_status",    "PAC Power",           MQTT_TOPIC_VALUES_ACTIVE_STATUS,    "",   ""},
+    {"heating",          "PAC Heating",         MQTT_TOPIC_VALUES_HEATING,          "",   ""},
+  };
+
+  for (auto &s : sensors)
+  {
+    char disco_topic[128];
+    snprintf(disco_topic, sizeof(disco_topic),
+             "homeassistant/sensor/poolheater/%s/config", s.id);
+
+    char payload[512];
+    if (strlen(s.dev_class) > 0) {
+      snprintf(payload, sizeof(payload),
+        "{"
+          "\"name\":\"%s\","
+          "\"stat_t\":\"%s\","
+          "\"uniq_id\":\"poolheater_%s\","
+          "\"unit_of_meas\":\"%s\","
+          "\"dev_cla\":\"%s\","
+          "\"dev\":{\"ids\":[\"poolheater_wemos\"],\"name\":\"Poolex Jetline 90\",\"mf\":\"Poolex\",\"mdl\":\"Jetline Selection 90\"}"
+        "}", s.name, s.topic, s.id, s.unit, s.dev_class);
+    } else {
+      snprintf(payload, sizeof(payload),
+        "{"
+          "\"name\":\"%s\","
+          "\"stat_t\":\"%s\","
+          "\"uniq_id\":\"poolheater_%s\","
+          "\"dev\":{\"ids\":[\"poolheater_wemos\"],\"name\":\"Poolex Jetline 90\",\"mf\":\"Poolex\",\"mdl\":\"Jetline Selection 90\"}"
+        "}", s.name, s.topic, s.id);
+    }
+
+    pubsubClient.publish(disco_topic, payload, true);
+    yield();
+  }
+
+  debugI("HA Discovery published (%d sensors)", 9);
 }
 
 void pushMQTTMessage(const char *topic, const char *msg)
