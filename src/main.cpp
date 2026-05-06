@@ -67,6 +67,7 @@ static int last_water_in = -1, last_water_out = -1, last_air = -1;
 static int last_coil = -1, last_gas = -1, last_power = -1, last_heating = -1;
 static int last_setpoint = -1, last_setpoint_confirmed = -1;
 static int last_mode = -1;
+static String last_error = "";
 static unsigned long last_full_publish_ms = 0;
 const unsigned long MQTT_FULL_PUBLISH_INTERVAL_MS = 60000; // republish toutes les 60s
 
@@ -86,6 +87,7 @@ const char *MQTT_TOPIC_VALUES_HEATING = "poolheater/values/heating";
 const char *MQTT_TOPIC_VALUES_SETPOINT = "poolheater/values/setpoint";
 const char *MQTT_TOPIC_VALUES_SETPOINT_CONFIRMED = "poolheater/values/setpoint_confirmed";
 const char *MQTT_TOPIC_VALUES_MODE = "poolheater/values/mode";
+const char *MQTT_TOPIC_VALUES_ERROR = "poolheater/values/error";
 // Partie état/config (burst long sans les 9B capteurs) — pour analyse future
 const char *MQTT_TOPIC_VALUES_STATE_RAW = "poolheater/values/state_raw";
 // MQTT COMMANDS
@@ -547,6 +549,13 @@ void processBurst(const uint8_t *burst, int len)
   if (burst[0] == 0x40)
   {
     debugV("PAC-alert  (%2dB): 0x40 flood", len);
+    // Publier l'état d'erreur (on ne connaît pas encore le code exact, mais 0x40 = erreur active)
+    if (last_error != "PL")
+    {
+      pushMQTTMessage(MQTT_TOPIC_VALUES_ERROR, "PL");
+      last_error = "PL";
+      debugD("Error PAC: PL (0x40 flood detected)");
+    }
     return;
   }
 
@@ -634,6 +643,14 @@ bool decodeSensorTail(const uint8_t *tail)
   if (force || gas_temp != last_gas)         { pushMQTTValue(MQTT_TOPIC_VALUES_GAZ_TEMP,         gas_temp);    last_gas = gas_temp; }
   if (force || power_on != last_power)       { pushMQTTValue(MQTT_TOPIC_VALUES_ACTIVE_STATUS,    power_on);    last_power = power_on; }
   if (force || heating != last_heating)      { pushMQTTValue(MQTT_TOPIC_VALUES_HEATING,          heating);     last_heating = heating; }
+
+  // Si on décode des capteurs normaux avec power=1, la PAC fonctionne → clear error
+  if (power_on == 1 && last_error != "none")
+  {
+    pushMQTTMessage(MQTT_TOPIC_VALUES_ERROR, "none");
+    last_error = "none";
+    debugD("Error PAC: cleared (normal operation)");
+  }
   return true;
 }
 

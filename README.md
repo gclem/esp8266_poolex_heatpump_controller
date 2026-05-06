@@ -216,6 +216,7 @@ Utiliser les commandes RemoteDebug pour changer le niveau de log (verbose, debug
 | `poolheater/values/setpoint` | Consigne demandée (télécommande) | °C |
 | `poolheater/values/setpoint_confirmed` | Consigne confirmée (PAC) | °C |
 | `poolheater/values/mode` | Mode de fonctionnement | `heat` / `auto` / `cool` |
+| `poolheater/values/error` | Code erreur PAC | `none` / `PL` / ... |
 | `poolheater/values/state_raw` | Trame d'état brute (hex) | Pour analyse |
 | `poolheater/status` | État connexion (retained) | ON |
 
@@ -300,6 +301,12 @@ mqtt:
       state_topic: "poolheater/values/mode"
       force_update: true
       unique_id: "pool_hp_mode"
+
+    - name: "Heat pump error"
+      state_topic: "poolheater/values/error"
+      force_update: true
+      unique_id: "pool_hp_error"
+      icon: "mdi:alert-circle"
 ```
 
 ### Valeurs du mode
