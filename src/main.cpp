@@ -68,6 +68,8 @@ static int last_coil = -1, last_gas = -1, last_power = -1, last_heating = -1;
 static int last_setpoint = -1, last_setpoint_confirmed = -1;
 static int last_mode = -1;
 static String last_error = "";
+static unsigned long last_error_seen_ms = 0;  // dernier 0x40 reçu
+const unsigned long ERROR_CLEAR_DELAY_MS = 10000;  // 10s sans 0x40 pour clear l'erreur
 static unsigned long last_full_publish_ms = 0;
 const unsigned long MQTT_FULL_PUBLISH_INTERVAL_MS = 60000; // republish toutes les 60s
 
@@ -549,6 +551,7 @@ void processBurst(const uint8_t *burst, int len)
   if (burst[0] == 0x40)
   {
     debugV("PAC-alert  (%2dB): 0x40 flood", len);
+    last_error_seen_ms = millis();
     // Publier l'état d'erreur (on ne connaît pas encore le code exact, mais 0x40 = erreur active)
     if (last_error != "PL")
     {
@@ -644,12 +647,13 @@ bool decodeSensorTail(const uint8_t *tail)
   if (force || power_on != last_power)       { pushMQTTValue(MQTT_TOPIC_VALUES_ACTIVE_STATUS,    power_on);    last_power = power_on; }
   if (force || heating != last_heating)      { pushMQTTValue(MQTT_TOPIC_VALUES_HEATING,          heating);     last_heating = heating; }
 
-  // Si on décode des capteurs normaux avec power=1, la PAC fonctionne → clear error
-  if (power_on == 1 && last_error != "none")
+  // Clear error seulement si power=1 ET aucun 0x40 depuis 10 secondes
+  if (power_on == 1 && last_error != "none" &&
+      (millis() - last_error_seen_ms) > ERROR_CLEAR_DELAY_MS)
   {
     pushMQTTMessage(MQTT_TOPIC_VALUES_ERROR, "none");
     last_error = "none";
-    debugD("Error PAC: cleared (normal operation)");
+    debugD("Error PAC: cleared (no 0x40 for 10s + power ON)");
   }
   return true;
 }
