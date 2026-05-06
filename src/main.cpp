@@ -229,17 +229,23 @@ static unsigned long residual_last_activity = 0;
 const unsigned long RESIDUAL_TIMEOUT_MS = 100; // flush si pas de nouvelles données pendant 100ms
 
 // Lit le bus RS485 et découpe le flux en bursts (séquences non-0x01).
-// Accumule les bytes dans un buffer résiduel pour gérer les trames coupées par le timeout.
+// Accumule les bytes dans un buffer résiduel pour gérer les trames coupées.
+// Limite la fréquence de traitement pour laisser le WiFi stack respirer.
 void sniffing()
 {
   const int READ_SIZE = 250;
   uint8_t buf[READ_SIZE];
 
+  // Laisser le WiFi respirer : ne traiter le bus que toutes les 20ms max
+  static unsigned long last_read_ms = 0;
+  unsigned long now = millis();
+  if (now - last_read_ms < 20) return;
+
   int avail = PS.available();
   if (avail <= 0)
   {
     // Si le residual stagne sans terminateur, forcer le traitement
-    if (residual_len > 0 && (millis() - residual_last_activity) > RESIDUAL_TIMEOUT_MS)
+    if (residual_len > 0 && (now - residual_last_activity) > RESIDUAL_TIMEOUT_MS)
     {
       if (residual_len >= 3)
         processBurst(residual, residual_len);
@@ -248,7 +254,8 @@ void sniffing()
     return;
   }
 
-  residual_last_activity = millis();
+  last_read_ms = now;
+  residual_last_activity = now;
 
   // Lire uniquement ce qui est disponible — ne jamais bloquer
   int to_read = min(avail, READ_SIZE);
@@ -288,6 +295,7 @@ void sniffing()
       processBurst(residual + burst_start, burst_len);
 
     last_processed = i;
+    yield(); // laisser le WiFi stack traiter entre chaque burst
   }
 
   // Compacte le résiduel : garde uniquement les bytes non traités
@@ -298,10 +306,10 @@ void sniffing()
       memmove(residual, residual + last_processed, residual_len);
   }
 
-  // Sécurité : si le buffer déborde sans aucun idle byte, on le vide
+  // Sécurité : si le buffer déborde sans aucun idle byte, on le vide sans traiter
   if (residual_len >= (int)sizeof(residual) - READ_SIZE)
   {
-    debugE("Residual buffer overflow, flushing %d bytes", residual_len);
+    debugV("Residual overflow, dropping %d bytes", residual_len);
     residual_len = 0;
   }
 
@@ -309,6 +317,10 @@ void sniffing()
 }
 
 // Identifie et traite un burst selon son type.
+// Rate-limit les trames non reconnues pour éviter de saturer le debug/WiFi.
+static unsigned long last_unknown_log_ms = 0;
+static int unknown_count_since_log = 0;
+
 void processBurst(const uint8_t *burst, int len)
 {
   // Heartbeat télécommande → PAC : XX [04|0C] FF ... (12B)
@@ -377,11 +389,24 @@ void processBurst(const uint8_t *burst, int len)
   if (len == SENSOR_TAIL_LEN && burst[len - 1] == 0xFF && burst[len - 2] == 0xFF && burst[len - 4] == 0xFF)
   {
     if (!decodeSensorTail(burst))
-      debugV("Unknown    (%2dB): %s", len, hexDumpFast(burst, len));
+      debugV("SensorIso INVALID: %s", hexDumpFast(burst, len));
     return;
   }
 
-  debugV("Unknown    (%2dB): %s", len, hexDumpFast(burst, len));
+  // Trame non reconnue — rate-limited pour ne pas saturer
+  unknown_count_since_log++;
+  unsigned long now = millis();
+  if (now - last_unknown_log_ms > 2000)
+  {
+    if (unknown_count_since_log > 1) {
+      debugD("Unknown    : %d trames non reconnues en 2s (dernière %dB: %s)",
+             unknown_count_since_log, len, hexDumpFast(burst, min(len, 16)));
+    } else {
+      debugV("Unknown    (%2dB): %s", len, hexDumpFast(burst, len));
+    }
+    last_unknown_log_ms = now;
+    unknown_count_since_log = 0;
+  }
 }
 
 // Décode les 9 octets capteurs (fin de burst, terminés FF FF).
