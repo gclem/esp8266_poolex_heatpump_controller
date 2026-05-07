@@ -57,7 +57,15 @@ PubSubClient pubsubClient(wifiClient);
 
 // DEBUGGER VAR
 RemoteDebug Debug;
-static bool raw_log_enabled = false; // Active les logs raw() ultra-fréquents (via commande telnet 'r')
+static bool raw_log_enabled = false; // Active les logs raw() ultra-fréquents (via commande telnet 'raw')
+
+void processCmdRemoteDebug() {
+  String cmd = Debug.getLastCommand();
+  if (cmd == "raw") {
+    raw_log_enabled = !raw_log_enabled;
+    debugI("Raw logging %s", raw_log_enabled ? "ENABLED" : "DISABLED");
+  }
+}
 
 // TX PROBE STATE
 volatile bool probe_pending = false;
@@ -155,13 +163,7 @@ void setup()
   Debug.showProfiler(true);
   Debug.showColors(true);
   Debug.setHelpProjectsCmds("raw - Toggle raw byte logging (very verbose)");
-  Debug.setCallBackProjectCmds([]() {
-    String cmd = Debug.getLastCommand();
-    if (cmd == "raw") {
-      raw_log_enabled = !raw_log_enabled;
-      debugI("Raw logging %s", raw_log_enabled ? "ENABLED" : "DISABLED");
-    }
-  });
+  Debug.setCallBackProjectCmds(&processCmdRemoteDebug);
   Serial.println("Remote debugger initialized.");
 
   // OTA
