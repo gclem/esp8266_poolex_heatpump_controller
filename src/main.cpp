@@ -57,15 +57,6 @@ PubSubClient pubsubClient(wifiClient);
 
 // DEBUGGER VAR
 RemoteDebug Debug;
-static bool raw_log_enabled = false; // Active les logs raw() ultra-fréquents (via commande telnet 'raw')
-
-void processCmdRemoteDebug() {
-  String cmd = Debug.getLastCommand();
-  if (cmd == "raw") {
-    raw_log_enabled = !raw_log_enabled;
-    debugI("Raw logging %s", raw_log_enabled ? "ENABLED" : "DISABLED");
-  }
-}
 
 // TX PROBE STATE
 volatile bool probe_pending = false;
@@ -162,8 +153,6 @@ void setup()
   Debug.setResetCmdEnabled(true);
   Debug.showProfiler(true);
   Debug.showColors(true);
-  Debug.setHelpProjectsCmds("raw - Toggle raw byte logging (very verbose)");
-  Debug.setCallBackProjectCmds(&processCmdRemoteDebug);
   Serial.println("Remote debugger initialized.");
 
   // OTA
@@ -299,7 +288,7 @@ void sniffing()
   int size = PS.readBytes((char *)buf, to_read);
   if (size <= 0) return;
 
-  if (raw_log_enabled) debugV("raw(%d): %s", size, hexDumpFast(buf, size));
+  // debugV("raw(%d): %s", size, hexDumpFast(buf, size));
 
   // Ajoute les nouvelles données au buffer résiduel
   int copy_len = min(size, (int)(sizeof(residual) - residual_len));
@@ -379,7 +368,7 @@ void processBurst(const uint8_t *burst, int len)
     bool power_cmd = (burst[1 + offset] == 0x0C);
     debugD("Remote HB  : setpoint=%d°C (confirmed=%d°C) power_cmd=%d",
            setpoint_requested, setpoint_confirmed, power_cmd);
-    if (raw_log_enabled) debugV("Remote HB raw: %s", hexDumpFast(burst, len));
+    // debugV("Remote HB raw: %s", hexDumpFast(burst, len));
     bool force = (millis() - last_full_publish_ms) > MQTT_FULL_PUBLISH_INTERVAL_MS;
     if (force || setpoint_requested != last_setpoint)           { pushMQTTValue(MQTT_TOPIC_VALUES_SETPOINT, setpoint_requested);           last_setpoint = setpoint_requested; }
     if (force || setpoint_confirmed != last_setpoint_confirmed) { pushMQTTValue(MQTT_TOPIC_VALUES_SETPOINT_CONFIRMED, setpoint_confirmed); last_setpoint_confirmed = setpoint_confirmed; }
