@@ -547,11 +547,12 @@ void processBurst(const uint8_t *burst, int len)
     if (burst[0] == 0x40)
     {
       last_error_seen_ms = millis();
-      if (last_error != "PL")
+      // Ne signaler l'erreur que si la PAC n'est PAS en fonctionnement (power=0)
+      if (last_power <= 0 && last_error != "PL")
       {
         pushMQTTMessage(MQTT_TOPIC_VALUES_ERROR, "PL");
         last_error = "PL";
-        debugD("Error PAC: PL (short 0x40 burst)");
+        debugD("Error PAC: PL (short 0x40 + power OFF)");
       }
     }
     else
@@ -566,12 +567,12 @@ void processBurst(const uint8_t *burst, int len)
   {
     debugV("PAC-alert  (%2dB): 0x40 flood", len);
     last_error_seen_ms = millis();
-    // Publier l'état d'erreur (on ne connaît pas encore le code exact, mais 0x40 = erreur active)
-    if (last_error != "PL")
+    // Ne signaler l'erreur que si la PAC n'est PAS en fonctionnement (power=0)
+    if (last_power <= 0 && last_error != "PL")
     {
       pushMQTTMessage(MQTT_TOPIC_VALUES_ERROR, "PL");
       last_error = "PL";
-      debugD("Error PAC: PL (0x40 flood detected)");
+      debugD("Error PAC: PL (0x40 flood + power OFF)");
     }
     return;
   }
@@ -632,13 +633,12 @@ void processBurst(const uint8_t *burst, int len)
       if (force || power_on != last_power)       { pushMQTTValue(MQTT_TOPIC_VALUES_ACTIVE_STATUS, power_on);      last_power = power_on; }
       if (force || heating != last_heating)      { pushMQTTValue(MQTT_TOPIC_VALUES_HEATING, heating);             last_heating = heating; }
 
-      // Clear error si power revient
-      if (power_on == 1 && last_error != "none" &&
-          (millis() - last_error_seen_ms) > ERROR_CLEAR_DELAY_MS)
+      // Clear error si power revient (la PAC fonctionne malgré les 0x40 résiduels)
+      if (power_on == 1 && last_error != "none")
       {
         pushMQTTMessage(MQTT_TOPIC_VALUES_ERROR, "none");
         last_error = "none";
-        debugD("Error PAC: cleared (no 0x40 for 10s + power ON)");
+        debugD("Error PAC: cleared (power ON in sensor)");
       }
       return;
     }
@@ -701,13 +701,12 @@ bool decodeSensorTail(const uint8_t *tail)
   if (force || power_on != last_power)       { pushMQTTValue(MQTT_TOPIC_VALUES_ACTIVE_STATUS,    power_on);    last_power = power_on; }
   if (force || heating != last_heating)      { pushMQTTValue(MQTT_TOPIC_VALUES_HEATING,          heating);     last_heating = heating; }
 
-  // Clear error seulement si power=1 ET aucun 0x40 depuis 10 secondes
-  if (power_on == 1 && last_error != "none" &&
-      (millis() - last_error_seen_ms) > ERROR_CLEAR_DELAY_MS)
+  // Clear error dès que power=1 (la PAC fonctionne malgré les 0x40 résiduels)
+  if (power_on == 1 && last_error != "none")
   {
     pushMQTTMessage(MQTT_TOPIC_VALUES_ERROR, "none");
     last_error = "none";
-    debugD("Error PAC: cleared (no 0x40 for 10s + power ON)");
+    debugD("Error PAC: cleared (power ON)");
   }
   return true;
 }
