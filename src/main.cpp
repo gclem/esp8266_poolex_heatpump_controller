@@ -505,6 +505,26 @@ void processBurst(const uint8_t *burst, int len)
       {
         // Burst sans terminaison FF FF — état machine (mode erreur ou config)
         debugV("PAC-state  (%2dB): %s", len, hexDumpFast(burst, len));
+
+        // Trame courte 3B : [00|80] [flag] [status_byte]
+        // status_byte = 0x14 → normal, 0x0C → erreur PL
+        if (len == 3 && (burst[0] == 0x00 || burst[0] == 0x80))
+        {
+          uint8_t status_byte = burst[2];
+          if (status_byte == 0x0C && last_error != "PL")
+          {
+            pushMQTTMessage(MQTT_TOPIC_VALUES_ERROR, "PL");
+            last_error = "PL";
+            debugD("Error PAC: PL (status byte=0x0C)");
+          }
+          else if (status_byte == 0x14 && last_error != "none")
+          {
+            pushMQTTMessage(MQTT_TOPIC_VALUES_ERROR, "none");
+            last_error = "none";
+            debugD("Error PAC: cleared (status byte=0x14)");
+          }
+        }
+
         if (len >= 10) // assez de données pour être intéressant
         {
           pushMQTTMessage(MQTT_TOPIC_VALUES_STATE_RAW, hexDumpFast(burst, len));
