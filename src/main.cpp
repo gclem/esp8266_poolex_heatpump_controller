@@ -68,8 +68,6 @@ static int last_coil = -1, last_gas = -1, last_power = -1, last_heating = -1;
 static int last_setpoint = -1, last_setpoint_confirmed = -1;
 static int last_mode = -1;
 static String last_error = "";
-static unsigned long last_error_seen_ms = 0;  // dernier 0x40 reçu
-const unsigned long ERROR_CLEAR_DELAY_MS = 10000;  // 10s sans 0x40 pour clear l'erreur
 static unsigned long last_full_publish_ms = 0;
 const unsigned long MQTT_FULL_PUBLISH_INTERVAL_MS = 60000; // republish toutes les 60s
 
@@ -543,37 +541,14 @@ void processBurst(const uint8_t *burst, int len)
   // Trame courte (flags isolés, 0x40 flooding en mode erreur)
   if (len <= 4)
   {
-    // Si c'est un burst de 0x40, c'est un signal d'erreur PAC
-    if (burst[0] == 0x40)
-    {
-      last_error_seen_ms = millis();
-      // Ne signaler l'erreur que si la PAC n'est PAS en fonctionnement (power=0)
-      if (last_power <= 0 && last_error != "PL")
-      {
-        pushMQTTMessage(MQTT_TOPIC_VALUES_ERROR, "PL");
-        last_error = "PL";
-        debugD("Error PAC: PL (short 0x40 + power OFF)");
-      }
-    }
-    else
-    {
-      debugV("Short(%dB)  : %s", len, hexDumpFast(burst, len));
-    }
+    debugV("Short(%dB)  : %s", len, hexDumpFast(burst, len));
     return;
   }
 
-  // Burst de 0x40 (signal erreur PAC, mode PL) — ignorer silencieusement
+  // Burst de 0x40 — signal bus normal (pas un indicateur d'erreur)
   if (burst[0] == 0x40)
   {
-    debugV("PAC-alert  (%2dB): 0x40 flood", len);
-    last_error_seen_ms = millis();
-    // Ne signaler l'erreur que si la PAC n'est PAS en fonctionnement (power=0)
-    if (last_power <= 0 && last_error != "PL")
-    {
-      pushMQTTMessage(MQTT_TOPIC_VALUES_ERROR, "PL");
-      last_error = "PL";
-      debugD("Error PAC: PL (0x40 flood + power OFF)");
-    }
+    debugV("PAC-signal (%2dB): 0x40 burst", len);
     return;
   }
 
@@ -632,14 +607,6 @@ void processBurst(const uint8_t *burst, int len)
       if (force || gas_temp != last_gas)         { pushMQTTValue(MQTT_TOPIC_VALUES_GAZ_TEMP, gas_temp);           last_gas = gas_temp; }
       if (force || power_on != last_power)       { pushMQTTValue(MQTT_TOPIC_VALUES_ACTIVE_STATUS, power_on);      last_power = power_on; }
       if (force || heating != last_heating)      { pushMQTTValue(MQTT_TOPIC_VALUES_HEATING, heating);             last_heating = heating; }
-
-      // Clear error si power revient (la PAC fonctionne malgré les 0x40 résiduels)
-      if (power_on == 1 && last_error != "none")
-      {
-        pushMQTTMessage(MQTT_TOPIC_VALUES_ERROR, "none");
-        last_error = "none";
-        debugD("Error PAC: cleared (power ON in sensor)");
-      }
       return;
     }
     // Si validation échoue, tenter le décodage normal (burst[5]==FF)
@@ -700,14 +667,6 @@ bool decodeSensorTail(const uint8_t *tail)
   if (force || gas_temp != last_gas)         { pushMQTTValue(MQTT_TOPIC_VALUES_GAZ_TEMP,         gas_temp);    last_gas = gas_temp; }
   if (force || power_on != last_power)       { pushMQTTValue(MQTT_TOPIC_VALUES_ACTIVE_STATUS,    power_on);    last_power = power_on; }
   if (force || heating != last_heating)      { pushMQTTValue(MQTT_TOPIC_VALUES_HEATING,          heating);     last_heating = heating; }
-
-  // Clear error dès que power=1 (la PAC fonctionne malgré les 0x40 résiduels)
-  if (power_on == 1 && last_error != "none")
-  {
-    pushMQTTMessage(MQTT_TOPIC_VALUES_ERROR, "none");
-    last_error = "none";
-    debugD("Error PAC: cleared (power ON)");
-  }
   return true;
 }
 
