@@ -68,6 +68,8 @@ static int last_coil = -1, last_gas = -1, last_power = -1, last_heating = -1;
 static int last_setpoint = -1, last_setpoint_confirmed = -1;
 static int last_mode = -1;
 static String last_error = "";
+static uint8_t error_debounce_val = 0;    // dernière valeur status_byte vue
+static uint8_t error_debounce_count = 0;  // nb de fois consécutives
 static unsigned long last_full_publish_ms = 0;
 const unsigned long MQTT_FULL_PUBLISH_INTERVAL_MS = 60000; // republish toutes les 60s
 
@@ -506,23 +508,12 @@ void processBurst(const uint8_t *burst, int len)
         // Burst sans terminaison FF FF — état machine (mode erreur ou config)
         debugV("PAC-state  (%2dB): %s", len, hexDumpFast(burst, len));
 
+        // TODO: Détection PL désactivée — les valeurs 0x0C/0x14 ne correspondent pas
+        // aux observations terrain. À recalibrer avec de nouvelles captures.
         // Trame courte 3B : [00|80] [flag] [status_byte]
-        // status_byte = 0x14 → normal, 0x0C → erreur PL
         if (len == 3 && (burst[0] == 0x00 || burst[0] == 0x80))
         {
-          uint8_t status_byte = burst[2];
-          if (status_byte == 0x0C && last_error != "PL")
-          {
-            pushMQTTMessage(MQTT_TOPIC_VALUES_ERROR, "PL");
-            last_error = "PL";
-            debugD("Error PAC: PL (status byte=0x0C)");
-          }
-          else if (status_byte == 0x14 && last_error != "none")
-          {
-            pushMQTTMessage(MQTT_TOPIC_VALUES_ERROR, "none");
-            last_error = "none";
-            debugD("Error PAC: cleared (status byte=0x14)");
-          }
+          debugV("PAC-status 3B: %02X %02X %02X", burst[0], burst[1], burst[2]);
         }
 
         if (len >= 10) // assez de données pour être intéressant
@@ -746,6 +737,8 @@ void connectToMQTTBroker()
     {
       Debug.println("Connected to MQTT broker.");
       pubsubClient.publish(MQTT_TOPIC_STATUS, "ON", true);
+      pubsubClient.publish(MQTT_TOPIC_VALUES_ERROR, "none");
+      last_error = "none";
       pubsubClient.subscribe(MQTT_TOPIC_COMMAND_PROBE);
     }
     else
