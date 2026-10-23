@@ -4,24 +4,24 @@
 #define HOST_NAME "esp8266_poolheater_controller"
 
 // UART PROTOCOL — GPIO (Wemos D1 Mini)
-// Câblage actuel : RO→D2, DI→D1, DE/RE→D5
+// Current wiring: RO→D2, DI→D1, DE/RE→D5
 #define UART_RTS 14  // GPIO14 = D5 : MAX485 DE/RE
 #define UART_TX   5  // GPIO5  = D1 : MAX485 DI
 #define UART_RX   4  // GPIO4  = D2 : MAX485 RO
 #define PORT_SPEED 9600
 
-// Protocol bus — trames identifiées par analyse live (mai 2026)
+// Bus protocol — frames identified by live analysis (May 2026)
 //
-//  Cycle bus (~190ms) — pattern alternant :
-//   [PAC→remote] [flags] [état ~14B][capteurs 9B] : trame complète
-//   [remote→PAC] XX 04 FF ... (12B) : heartbeat télécommande, constant
-//   [PAC→remote] FD XX ... (13B) : ACK PAC
-//   ... (le cycle se répète)
+//  Bus cycle (~190ms) — alternating pattern:
+//   [PAC→remote] [flags] [state ~14B][sensors 9B] : full frame
+//   [remote→PAC] XX 04 FF ... (12B) : remote control heartbeat, constant
+//   [PAC→remote] FD XX ... (13B) : PAC ACK
+//   ... (the cycle repeats)
 //
-//  Séparateur inter-trames : octets 0x01 (idle bus)
+//  Inter-frame separator: 0x01 bytes (idle bus)
 //
-//  Structure trame PAC : [flag1: 00|80] [flag2 opt: FC|06|08|88|5C] <état> <capteurs 9B>
-//  Les 9 DERNIERS octets = capteurs (terminés par FF FF) :
+//  PAC frame structure: [flag1: 00|80] [optional flag2: FC|06|08|88|5C] <state> <sensors 9B>
+//  The LAST 9 bytes = sensors (terminated by FF FF):
 //    [0] water_in_temp    = ((0xFF - x) >> 3) & 0x3F
 //    [1] air_ambient_temp = ((0xFF - x) >> 1) & 0x3F
 //    [2] coil_temp        = ((0xFF - x) >> 1) & 0x3F
@@ -29,14 +29,14 @@
 //    [4] water_out_temp   = ((0xFF - x) >> 1) & 0x3F
 //    [5] constant 0xFF
 //    [6] active_status    = ((0xFF - x) >> 4) & 0x01
-//    [7-8] constant FF FF (terminaison)
+//    [7-8] constant FF FF (termination)
 //
-//  La partie AVANT les 9B = état/config machine (consigne, mode — à décoder)
-#define FRAME_IDLE_BYTE       0x01  // séparateur inter-trames sur le bus
-#define FRAME_SYNC_BYTE       0xFF  // parfois capturé isolément en début de burst
-#define SENSOR_TAIL_LEN        9    // capteurs = 9 derniers octets du burst (terminé FF FF)
-#define SENSOR_TEMP_MIN        5    // °C — borne basse plausible pour validation
-#define SENSOR_TEMP_MAX       45    // °C — borne haute plausible pour validation
+//  The part BEFORE the 9B = machine state/config (setpoint, mode — to be decoded)
+#define FRAME_IDLE_BYTE       0x01  // inter-frame separator on the bus
+#define FRAME_SYNC_BYTE       0xFF  // sometimes captured on its own at the start of a burst
+#define SENSOR_TAIL_LEN        9    // sensors = last 9 bytes of the burst (terminated by FF FF)
+#define SENSOR_TEMP_MIN        5    // °C — plausible lower bound for validation
+#define SENSOR_TEMP_MAX       45    // °C — plausible upper bound for validation
 
 // COMMUNICATIONS PARAMETERS
 #define USE_MDNS true
@@ -62,16 +62,16 @@ RemoteDebug Debug;
 volatile bool probe_pending = false;
 static uint8_t probe_counter = 0x01;
 
-// MQTT rate limiting — ne publie que si la valeur a changé OU toutes les 60s
+// MQTT rate limiting — only publish if the value changed OR every 60s
 static int last_water_in = -1, last_water_out = -1, last_air = -1;
 static int last_coil = -1, last_gas = -1, last_power = -1, last_heating = -1;
 static int last_setpoint = -1, last_setpoint_confirmed = -1;
 static int last_mode = -1;
 static String last_error = "";
-static uint8_t error_debounce_val = 0;    // dernière valeur status_byte vue
-static uint8_t error_debounce_count = 0;  // nb de fois consécutives
+static uint8_t error_debounce_val = 0;    // last status_byte value seen
+static uint8_t error_debounce_count = 0;  // number of consecutive times
 static unsigned long last_full_publish_ms = 0;
-const unsigned long MQTT_FULL_PUBLISH_INTERVAL_MS = 60000; // republish toutes les 60s
+const unsigned long MQTT_FULL_PUBLISH_INTERVAL_MS = 60000; // republish every 60s
 
 // MQTT reconnect throttle
 static unsigned long mqtt_last_attempt = 0;
@@ -90,7 +90,7 @@ const char *MQTT_TOPIC_VALUES_SETPOINT = "poolheater/values/setpoint";
 const char *MQTT_TOPIC_VALUES_SETPOINT_CONFIRMED = "poolheater/values/setpoint_confirmed";
 const char *MQTT_TOPIC_VALUES_MODE = "poolheater/values/mode";
 const char *MQTT_TOPIC_VALUES_ERROR = "poolheater/values/error";
-// Partie état/config (burst long sans les 9B capteurs) — pour analyse future
+// State/config part (long burst without the 9B sensors) — for future analysis
 const char *MQTT_TOPIC_VALUES_STATE_RAW = "poolheater/values/state_raw";
 // MQTT COMMANDS
 const char *MQTT_TOPIC_COMMAND_PROBE = "poolheater/command/probe";
@@ -109,8 +109,8 @@ void mqttReceiveCallback(char *topic, byte *payload, unsigned int length);
 
 void setup()
 {
-  // MAX485 en mode réception IMMÉDIATEMENT — avant tout le reste
-  // pour ne jamais corrompre le bus RS485, même si le WiFi échoue.
+  // MAX485 in receive mode IMMEDIATELY — before anything else
+  // so the RS485 bus is never corrupted, even if WiFi fails.
   pinMode(UART_RTS, OUTPUT);
   digitalWrite(UART_RTS, LOW);
 
@@ -187,20 +187,20 @@ void setup()
   Serial.println("UART Protocol is listening...");
 }
 
-// Flag indiquant que le bus est en idle (dernier traitement a fini sur des 0x01)
+// Flag indicating the bus is idle (last processing ended on 0x01 bytes)
 static bool bus_is_idle = false;
 
 void loop()
 {
-  // Donner du temps au WiFi quand le bus est en idle (entre les trames).
-  // On ne coupe JAMAIS le RX en plein milieu d'une trame.
+  // Give the WiFi stack time when the bus is idle (between frames).
+  // NEVER cut RX in the middle of a frame.
   static unsigned long last_wifi_window = 0;
   unsigned long now = millis();
   if (bus_is_idle && (now - last_wifi_window >= 50))
   {
     last_wifi_window = now;
     PS.enableRx(false);
-    delay(3); // 3ms WiFi window pendant l'idle bus
+    delay(3); // 3ms WiFi window during bus idle
     PS.enableRx(true);
   }
 
@@ -221,7 +221,7 @@ void loop()
 
   pubsubClient.loop();
 
-  // Si un probe est en attente, l'envoyer maintenant
+  // If a probe is pending, send it now
   if (probe_pending)
   {
     sendProbeHB();
@@ -231,7 +231,7 @@ void loop()
   sniffing();
 }
 
-// Retourne un dump hexadécimal lisible d'un buffer (buffer statique, pas d'allocation heap).
+// Returns a readable hex dump of a buffer (static buffer, no heap allocation).
 static char hex_buf[768]; // max 250 bytes * 3 chars + null
 const char* hexDumpFast(const uint8_t *buf, int len)
 {
@@ -240,34 +240,34 @@ const char* hexDumpFast(const uint8_t *buf, int len)
   {
     pos += snprintf(hex_buf + pos, sizeof(hex_buf) - pos, "%02X ", buf[i]);
   }
-  if (pos > 0) hex_buf[pos - 1] = '\0'; // enlève le dernier espace
+  if (pos > 0) hex_buf[pos - 1] = '\0'; // removes the trailing space
   else hex_buf[0] = '\0';
   return hex_buf;
 }
 
-// Buffer résiduel — conserve les bytes non terminés entre les appels readBytes.
+// Residual buffer — keeps unterminated bytes between readBytes calls.
 static uint8_t residual[300];
 static int residual_len = 0;
 static unsigned long residual_last_activity = 0;
-const unsigned long RESIDUAL_TIMEOUT_MS = 100; // flush si pas de nouvelles données pendant 100ms
+const unsigned long RESIDUAL_TIMEOUT_MS = 100; // flush if no new data for 100ms
 
-// Lit le bus RS485 et découpe le flux en bursts (séquences non-0x01).
-// Accumule les bytes dans un buffer résiduel pour gérer les trames coupées.
-// Limite la fréquence de traitement pour laisser le WiFi stack respirer.
+// Reads the RS485 bus and splits the stream into bursts (non-0x01 sequences).
+// Accumulates bytes in a residual buffer to handle split frames.
+// Limits the processing rate to let the WiFi stack breathe.
 void sniffing()
 {
   const int READ_SIZE = 250;
   uint8_t buf[READ_SIZE];
 
-  // Mini-throttle : lire au minimum toutes les 5ms pour accumuler des bytes
-  // (~5 bytes à 9600 baud) au lieu de lire byte par byte
+  // Mini-throttle: read at most every 5ms to accumulate bytes
+  // (~5 bytes at 9600 baud) instead of reading byte by byte
   static unsigned long last_read_ms = 0;
   unsigned long now = millis();
 
   int avail = PS.available();
   if (avail <= 0)
   {
-    // Si le residual stagne sans terminateur, forcer le traitement
+    // If the residual stalls without a terminator, force processing
     if (residual_len > 0 && (now - residual_last_activity) > RESIDUAL_TIMEOUT_MS)
     {
       if (residual_len >= 3)
@@ -278,32 +278,32 @@ void sniffing()
     return;
   }
 
-  // Ne lire que si au moins 5ms écoulées OU buffer > 20 bytes
+  // Only read if at least 5ms elapsed OR buffer > 20 bytes
   if (avail < 20 && (now - last_read_ms) < 5) return;
 
   last_read_ms = now;
   bus_is_idle = false;
   residual_last_activity = now;
 
-  // Lire uniquement ce qui est disponible — ne jamais bloquer
+  // Only read what is available — never block
   int to_read = min(avail, READ_SIZE);
   int size = PS.readBytes((char *)buf, to_read);
   if (size <= 0) return;
 
   // debugV("raw(%d): %s", size, hexDumpFast(buf, size));
 
-  // Ajoute les nouvelles données au buffer résiduel
+  // Append the new data to the residual buffer
   int copy_len = min(size, (int)(sizeof(residual) - residual_len));
   memcpy(residual + residual_len, buf, copy_len);
   residual_len += copy_len;
 
-  // Traite les bursts complets (terminés par au moins un 0x01)
+  // Process complete bursts (terminated by at least one 0x01)
   int i = 0;
   int last_processed = 0;
 
   while (i < residual_len)
   {
-    // Sauter les idle bytes
+    // Skip idle bytes
     while (i < residual_len && residual[i] == FRAME_IDLE_BYTE) i++;
     if (i >= residual_len) { last_processed = i; break; }
 
@@ -312,21 +312,21 @@ void sniffing()
 
     if (i >= residual_len)
     {
-      // Pas de 0x01 trouvé après ce burst → incomplet, garder pour la prochaine lecture
+      // No 0x01 found after this burst → incomplete, keep it for the next read
       last_processed = burst_start;
       break;
     }
 
-    // Burst complet (suivi d'un 0x01)
+    // Complete burst (followed by a 0x01)
     int burst_len = i - burst_start;
     if (burst_len >= 3)
       processBurst(residual + burst_start, burst_len);
 
     last_processed = i;
-    yield(); // laisser le WiFi stack traiter entre chaque burst
+    yield(); // let the WiFi stack run between bursts
   }
 
-  // Compacte le résiduel : garde uniquement les bytes non traités
+  // Compact the residual: keep only unprocessed bytes
   if (last_processed > 0)
   {
     residual_len -= last_processed;
@@ -334,10 +334,10 @@ void sniffing()
       memmove(residual, residual + last_processed, residual_len);
   }
 
-  // Le bus est idle si on a fini de traiter tout le residual (que des 0x01 restants ou vide)
+  // The bus is idle if the whole residual was processed (only 0x01 left, or empty)
   bus_is_idle = (residual_len == 0);
 
-  // Sécurité : si le buffer déborde sans aucun idle byte, on le vide sans traiter
+  // Safety: if the buffer overflows without any idle byte, drop it unprocessed
   if (residual_len >= (int)sizeof(residual) - READ_SIZE)
   {
     debugV("Residual overflow, dropping %d bytes", residual_len);
@@ -347,24 +347,24 @@ void sniffing()
   yield();
 }
 
-// Identifie et traite un burst selon son type.
-// Rate-limit les trames non reconnues pour éviter de saturer le debug/WiFi.
+// Identifies and processes a burst according to its type.
+// Rate-limits unrecognised frames to avoid saturating debug/WiFi.
 static unsigned long last_unknown_log_ms = 0;
 static int unknown_count_since_log = 0;
 
 void processBurst(const uint8_t *burst, int len)
 {
-  // Heartbeat télécommande → PAC : XX [04|0C] FF ... (12B)
-  // Parfois le premier byte (counter) est perdu → 11B avec burst[0]=[04|0C]
-  // byte[1]: 0x04=normal, 0x0C=commande power en cours
-  // byte[4] = consigne demandée: (0xFF - x) >> 1 = °C
-  // byte[3] = consigne confirmée PAC: même formule
+  // Remote control → PAC heartbeat: XX [04|0C] FF ... (12B)
+  // Sometimes the first byte (counter) is lost → 11B with burst[0]=[04|0C]
+  // byte[1]: 0x04=normal, 0x0C=power command in progress
+  // byte[4] = requested setpoint: (0xFF - x) >> 1 = °C
+  // byte[3] = PAC-confirmed setpoint: same formula
   bool is_hb_12 = (len == 12 && (burst[1] == 0x04 || burst[1] == 0x0C) && burst[2] == 0xFF);
   bool is_hb_11 = (len == 11 && (burst[0] == 0x04 || burst[0] == 0x0C) && burst[1] == 0xFF);
 
   if (is_hb_12 || is_hb_11)
   {
-    int offset = is_hb_11 ? -1 : 0; // décalage si counter manquant
+    int offset = is_hb_11 ? -1 : 0; // offset if counter is missing
     int setpoint_requested  = ((0xFF - burst[4 + offset]) >> 1) & 0x3F;
     int setpoint_confirmed  = ((0xFF - burst[3 + offset]) >> 1) & 0x3F;
     bool power_cmd = (burst[1 + offset] == 0x0C);
@@ -377,23 +377,23 @@ void processBurst(const uint8_t *burst, int len)
     return;
   }
 
-  // ACK PAC → télécommande : contient F1 xx D5 et tout le reste est FF
-  // Taille variable (8-13B) car parfois tronqué par le timing de lecture
+  // PAC → remote ACK: contains F1 xx D5 and everything else is FF
+  // Variable size (8-13B) as it is sometimes truncated by read timing
   if (len >= 7 && len <= 13 && burst[1] == 0xF1 && burst[3] == 0xD5)
   {
     debugV("PAC ACK    : %s", hexDumpFast(burst, len));
     return;
   }
-  // Variante tronquée : commence directement par F1
+  // Truncated variant: starts directly with F1
   if (len >= 6 && len <= 13 && burst[0] == 0xF1 && burst[2] == 0xD5)
   {
     debugV("PAC ACK    : %s", hexDumpFast(burst, len));
     return;
   }
 
-  // Trames PAC data : commencent par FF, 0x00 ou 0x80 (flag byte)
-  // Les 9 DERNIERS octets = capteurs (si le burst se termine par ... FF [status] FF FF)
-  // tail[5]=FF est à burst[len-4], tail[7]=FF à burst[len-2], tail[8]=FF à burst[len-1]
+  // PAC data frames: start with FF, 0x00 or 0x80 (flag byte)
+  // The LAST 9 bytes = sensors (if the burst ends with ... FF [status] FF FF)
+  // tail[5]=FF is at burst[len-4], tail[7]=FF at burst[len-2], tail[8]=FF at burst[len-1]
   if (burst[0] == FRAME_SYNC_BYTE || burst[0] == 0x00 || burst[0] == 0x80)
   {
     bool has_sensor_tail = (len >= SENSOR_TAIL_LEN) &&
@@ -405,26 +405,26 @@ void processBurst(const uint8_t *burst, int len)
     {
       int sensor_start = len - SENSOR_TAIL_LEN;
 
-      // Décoder les capteurs (9B en fin)
+      // Decode the sensors (9B at the end)
       if (!decodeSensorTail(burst + sensor_start))
         debugV("Sensor INVALID: %s", hexDumpFast(burst + sensor_start, SENSOR_TAIL_LEN));
 
-      // La partie avant = flags + état/config machine
+      // The part before = flags + machine state/config
       if (sensor_start > 0)
       {
         debugV("State      (%2dB): %s", sensor_start, hexDumpFast(burst, sensor_start));
         pushMQTTMessage(MQTT_TOPIC_VALUES_STATE_RAW, hexDumpFast(burst, sensor_start));
 
-        // Décodage du mode PAC (dernier byte de la partie état, trames longues ≥15B)
+        // Decode the PAC mode (last byte of the state part, long frames ≥15B)
         if (sensor_start >= 15)
         {
           uint8_t mode_byte = burst[sensor_start - 1];
           int mode = -1;
           switch (mode_byte) {
-            case 0x6C: mode = 2; break; // Chauffage seul
-            case 0x64: mode = 2; break; // Chauffage (variante transition)
-            case 0x54: mode = 1; break; // Auto (chaud + froid)
-            case 0x5C: mode = 0; break; // Refroidissement seul
+            case 0x6C: mode = 2; break; // Heat only
+            case 0x64: mode = 2; break; // Heat (transition variant)
+            case 0x54: mode = 1; break; // Auto (heat + cool)
+            case 0x5C: mode = 0; break; // Cool only
           }
           if (mode >= 0)
           {
@@ -438,8 +438,8 @@ void processBurst(const uint8_t *burst, int len)
             }
           }
 
-          // Consigne confirmée par la PAC : byte[2] du state (quand burst commence par 00/80)
-          // Formule identique à water_in : ((0xFF - x) >> 3) & 0x3F
+          // Setpoint confirmed by the PAC: state byte[2] (when burst starts with 00/80)
+          // Same formula as water_in: ((0xFF - x) >> 3) & 0x3F
           int sp_offset = (burst[0] == FRAME_SYNC_BYTE) ? 3 : 2;
           if (sp_offset < sensor_start)
           {
@@ -460,16 +460,16 @@ void processBurst(const uint8_t *burst, int len)
     }
     else
     {
-      // Mode erreur PAC (PL/no flow): trame courte avec capteurs en format réduit
+      // PAC error mode (PL/no flow): short frame with sensors in reduced format
       // Pattern: [00|80] [flag] [error_code] [5 temps] FF FF  (10B)
-      // Aussi : les 7 derniers octets [5 temps] FF FF sont le "sensor short tail"
+      // Also: the last 7 bytes [5 temps] FF FF are the "sensor short tail"
       bool has_short_tail = (len >= 7) &&
                             (burst[len - 1] == 0xFF) &&
                             (burst[len - 2] == 0xFF);
 
       if (has_short_tail && len <= 12)
       {
-        // Tenter le décodage en mode court (5 temp bytes + FF + FF)
+        // Try decoding in short mode (5 temp bytes + FF + FF)
         int tail_start = len - 7;
         const uint8_t *st = burst + tail_start;
         int water_in  = ((0xFF - st[0]) >> 3) & 0x3F;
@@ -480,14 +480,14 @@ void processBurst(const uint8_t *burst, int len)
           int air_ambient = ((0xFF - st[1]) >> 1) & 0x3F;
           int coil_temp   = ((0xFF - st[2]) >> 1) & 0x3F;
           int gas_temp    = ((0xFF - st[3]) >> 1) & 0x3F;
-          // En mode erreur, status = OFF (st[5]=FF, st[6]=FF → power=0)
+          // In error mode, status = OFF (st[5]=FF, st[6]=FF → power=0)
           int power_on = 0;
           int heating  = 0;
 
           debugD("Sensor(err): water_in=%d°C water_out=%d°C air=%d°C coil=%d°C gas=%d°C power=%d heating=%d",
                  water_in, water_out, air_ambient, coil_temp, gas_temp, power_on, heating);
 
-          // Publier les valeurs
+          // Publish the values
           bool force = (millis() - last_full_publish_ms) > MQTT_FULL_PUBLISH_INTERVAL_MS;
           if (force) last_full_publish_ms = millis();
           if (force || water_in != last_water_in)   { pushMQTTValue(MQTT_TOPIC_VALUES_WATER_IN_TEMP, water_in);     last_water_in = water_in; }
@@ -505,31 +505,31 @@ void processBurst(const uint8_t *burst, int len)
       }
       else
       {
-        // Burst sans terminaison FF FF — état machine (mode erreur ou config)
+        // Burst without FF FF termination — machine state (error mode or config)
         debugV("PAC-state  (%2dB): %s", len, hexDumpFast(burst, len));
 
-        // TODO: Détection PL désactivée — les valeurs 0x0C/0x14 ne correspondent pas
-        // aux observations terrain. À recalibrer avec de nouvelles captures.
-        // Trame courte 3B : [00|80] [flag] [status_byte]
+        // TODO: PL detection disabled — the 0x0C/0x14 values do not match
+        // field observations. To be recalibrated with new captures.
+        // Short 3B frame: [00|80] [flag] [status_byte]
         if (len == 3 && (burst[0] == 0x00 || burst[0] == 0x80))
         {
           debugV("PAC-status 3B: %02X %02X %02X", burst[0], burst[1], burst[2]);
         }
 
-        if (len >= 10) // assez de données pour être intéressant
+        if (len >= 10) // enough data to be interesting
         {
           pushMQTTMessage(MQTT_TOPIC_VALUES_STATE_RAW, hexDumpFast(burst, len));
 
-          // Décodage du mode PAC sur trames d'état longues (≥15B)
+          // Decode the PAC mode on long state frames (≥15B)
           if (len >= 15)
           {
             uint8_t mode_byte = burst[len - 1];
             int mode = -1;
             switch (mode_byte) {
-              case 0x6C: mode = 2; break; // Chauffage seul
-              case 0x64: mode = 2; break; // Chauffage (variante transition)
-              case 0x54: mode = 1; break; // Auto (chaud + froid)
-              case 0x5C: mode = 0; break; // Refroidissement seul
+              case 0x6C: mode = 2; break; // Heat only
+              case 0x64: mode = 2; break; // Heat (transition variant)
+              case 0x54: mode = 1; break; // Auto (heat + cool)
+              case 0x5C: mode = 0; break; // Cool only
             }
             if (mode >= 0)
             {
@@ -549,21 +549,21 @@ void processBurst(const uint8_t *burst, int len)
     return;
   }
 
-  // Trame courte (flags isolés, 0x40 flooding en mode erreur)
+  // Short frame (isolated flags, 0x40 flooding in error mode)
   if (len <= 4)
   {
     debugV("Short(%dB)  : %s", len, hexDumpFast(burst, len));
     return;
   }
 
-  // Burst de 0x40 — signal bus normal (pas un indicateur d'erreur)
+  // 0x40 burst — normal bus signal (not an error indicator)
   if (burst[0] == 0x40)
   {
     debugV("PAC-signal (%2dB): 0x40 burst", len);
     return;
   }
 
-  // Sensor tail isolé (7B en mode erreur: 5 temps + FF FF, sans header)
+  // Isolated sensor tail (7B in error mode: 5 temps + FF FF, no header)
   if (len == 7 && burst[len - 1] == 0xFF && burst[len - 2] == 0xFF)
   {
     int water_in  = ((0xFF - burst[0]) >> 3) & 0x3F;
@@ -576,7 +576,7 @@ void processBurst(const uint8_t *burst, int len)
       int gas_temp    = ((0xFF - burst[3]) >> 1) & 0x3F;
       debugD("Sensor(iso): water_in=%d°C water_out=%d°C air=%d°C coil=%d°C gas=%d°C",
              water_in, water_out, air_ambient, coil_temp, gas_temp);
-      // Publier (power=off en mode erreur)
+      // Publish (power=off in error mode)
       bool force = (millis() - last_full_publish_ms) > MQTT_FULL_PUBLISH_INTERVAL_MS;
       if (force) last_full_publish_ms = millis();
       if (force || water_in != last_water_in)   { pushMQTTValue(MQTT_TOPIC_VALUES_WATER_IN_TEMP, water_in);     last_water_in = water_in; }
@@ -590,8 +590,8 @@ void processBurst(const uint8_t *burst, int len)
     }
   }
 
-  // Sensor tail isolé (9B en mode erreur: 5 temps + status + status2 + FF FF)
-  // Ex: 54 E9 D1 C3 D9 FD EB FF FF — burst[5] n'est PAS 0xFF en mode erreur
+  // Isolated sensor tail (9B in error mode: 5 temps + status + status2 + FF FF)
+  // E.g. 54 E9 D1 C3 D9 FD EB FF FF — burst[5] is NOT 0xFF in error mode
   if (len == SENSOR_TAIL_LEN && burst[len - 1] == 0xFF && burst[len - 2] == 0xFF)
   {
     int water_in  = ((0xFF - burst[0]) >> 3) & 0x3F;
@@ -602,7 +602,7 @@ void processBurst(const uint8_t *burst, int len)
       int air_ambient = ((0xFF - burst[1]) >> 1) & 0x3F;
       int coil_temp   = ((0xFF - burst[2]) >> 1) & 0x3F;
       int gas_temp    = ((0xFF - burst[3]) >> 1) & 0x3F;
-      // bytes 5-6 = status (FD=off? EB=?), en mode erreur power=0
+      // bytes 5-6 = status (FD=off? EB=?), in error mode power=0
       int power_on = (burst[5] == 0xFF) ? (((0xFF - burst[6]) >> 4) & 0x01) : 0;
       int heating  = 0;
 
@@ -620,7 +620,7 @@ void processBurst(const uint8_t *burst, int len)
       if (force || heating != last_heating)      { pushMQTTValue(MQTT_TOPIC_VALUES_HEATING, heating);             last_heating = heating; }
       return;
     }
-    // Si validation échoue, tenter le décodage normal (burst[5]==FF)
+    // If validation fails, try normal decoding (burst[5]==FF)
     if (burst[len - 4] == 0xFF)
     {
       if (!decodeSensorTail(burst))
@@ -629,13 +629,13 @@ void processBurst(const uint8_t *burst, int len)
     }
   }
 
-  // Trame non reconnue — rate-limited pour ne pas saturer
+  // Unrecognised frame — rate-limited to avoid flooding
   unknown_count_since_log++;
   unsigned long now = millis();
   if (now - last_unknown_log_ms > 2000)
   {
     if (unknown_count_since_log > 1) {
-      debugD("Unknown    : %d trames non reconnues en 2s (dernière %dB: %s)",
+      debugD("Unknown    : %d unrecognised frames in 2s (last %dB: %s)",
              unknown_count_since_log, len, hexDumpFast(burst, min(len, 16)));
     } else {
       debugV("Unknown    (%2dB): %s", len, hexDumpFast(burst, len));
@@ -645,8 +645,8 @@ void processBurst(const uint8_t *burst, int len)
   }
 }
 
-// Décode les 9 octets capteurs (fin de burst, terminés FF FF).
-// Formules confirmées avec mesures réelles (eau=17°C, air=15°C, mai 2026).
+// Decodes the 9 sensor bytes (end of burst, terminated by FF FF).
+// Formulas confirmed with real measurements (water=17°C, air=15°C, May 2026).
 bool decodeSensorTail(const uint8_t *tail)
 {
   int water_in    = ((0xFF - tail[0]) >> 3) & 0x3F;
@@ -659,7 +659,7 @@ bool decodeSensorTail(const uint8_t *tail)
   uint8_t status_inv = 0xFF - tail[6];
   int power_on    = (status_inv >> 4) & 0x01;  // bit4 = power
   int heating     = (status_inv >> 1) & 0x01;  // bit1 = compressor/heating
-  // tail[7-8] = FF FF terminaison
+  // tail[7-8] = FF FF termination
 
   if (water_in  < SENSOR_TEMP_MIN || water_in  > SENSOR_TEMP_MAX) return false;
   if (water_out < SENSOR_TEMP_MIN || water_out > SENSOR_TEMP_MAX) return false;
@@ -667,7 +667,7 @@ bool decodeSensorTail(const uint8_t *tail)
   debugD("Sensor     : water_in=%d°C water_out=%d°C air=%d°C coil=%d°C gas=%d°C power=%d heating=%d",
          water_in, water_out, air_ambient, coil_temp, gas_temp, power_on, heating);
 
-  // Force republish toutes les 60s même si les valeurs n'ont pas changé
+  // Force republish every 60s even if values have not changed
   bool force = (millis() - last_full_publish_ms) > MQTT_FULL_PUBLISH_INTERVAL_MS;
   if (force) last_full_publish_ms = millis();
 
@@ -682,19 +682,19 @@ bool decodeSensorTail(const uint8_t *tail)
 }
 
 // --- TX Probe ---
-// Envoie un HB de "2ème télécommande" pour tester si la PAC répond.
-// Format identique au HB observé, mais avec un ID différent (0x6_ au lieu de 0x5_).
+// Sends a "2nd remote control" HB to test whether the PAC responds.
+// Same format as the observed HB, but with a different ID (0x6_ instead of 0x5_).
 
 void sendProbeHB()
 {
-  // HB template basé sur l'observation: XX 04 FF C7 C7 C9 FB FF AF DD 0B FD
-  // On utilise 0x6_ comme ID de "2ème télécommande"
+  // HB template based on observation: XX 04 FF C7 C7 C9 FB FF AF DD 0B FD
+  // We use 0x6_ as the ID of the "2nd remote control"
   uint8_t hb[12] = {
     (uint8_t)(0x60 | (probe_counter & 0x0F)),  // ID=0x6_ + counter
     0x04,  // keepalive normal
     0xFF,
-    0xC7,  // consigne confirmée (28°C par défaut)
-    0xC7,  // consigne demandée (28°C par défaut)
+    0xC7,  // confirmed setpoint (28°C default)
+    0xC7,  // requested setpoint (28°C default)
     0xC9,
     0xFB,
     0xFF,
@@ -704,22 +704,22 @@ void sendProbeHB()
     0xFD
   };
 
-  probe_counter += 2;  // incrémente comme la vraie télécommande
+  probe_counter += 2;  // increments like the real remote control
 
   debugI("TX PROBE: %s", hexDumpFast(hb, 12));
 
-  // Basculer MAX485 en TX
+  // Switch MAX485 to TX
   digitalWrite(UART_RTS, HIGH);
   delayMicroseconds(100);
 
-  // Envoyer le HB
+  // Send the HB
   PS.write(hb, 12);
   PS.flush();
 
-  // Attendre fin de transmission: 12 bytes * 10 bits / 9600 baud ≈ 12.5ms
+  // Wait for end of transmission: 12 bytes * 10 bits / 9600 baud ≈ 12.5ms
   delay(15);
 
-  // Repasser en RX
+  // Back to RX
   digitalWrite(UART_RTS, LOW);
 
   debugI("TX PROBE sent, listening for PAC response...");

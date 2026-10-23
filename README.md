@@ -1,30 +1,30 @@
-# ESP8266 Poolex Heatpump — Sniffer RS485 vers MQTT
+# ESP8266 Poolex Heatpump — RS485 Sniffer to MQTT
 
-Projet de reverse-engineering du protocole RS485 d'une pompe à chaleur **Poolex Jetline Selection 90** (fonctionne aussi sur la 95).
+Reverse-engineering project for the RS485 protocol of a **Poolex Jetline Selection 90** heat pump (also works on the 95).
 
-Le Wemos D1 Mini écoute passivement le bus RS485 entre la carte mère (PAC) et la télécommande filaire, décode les trames, et publie les valeurs sur MQTT pour **Home Assistant**.
+The Wemos D1 Mini passively listens to the RS485 bus between the heat pump motherboard (PAC) and the wired remote control, decodes the frames, and publishes the values to MQTT for **Home Assistant**.
 
-## État du projet
+## Project status
 
-✅ Fonctionnel — en production depuis mai 2026.
+✅ Working — in production since May 2026.
 
-**Ce qui fonctionne :**
-- Lecture des températures : eau entrée/sortie, air ambiant, serpentin (coil), gaz
-- Lecture de l'état : PAC ON/OFF, chauffage actif (compresseur)
-- Lecture de la consigne (setpoint) envoyée par la télécommande
-- Lecture de la consigne confirmée par la PAC
-- Publication MQTT sur changement + republication périodique (60s)
-- Mise à jour OTA (Over The Air)
-- Debug à distance via Telnet (RemoteDebug)
+**What works:**
+- Temperature readings: water in/out, ambient air, coil, gas
+- State readings: PAC ON/OFF, active heating (compressor)
+- Reading the setpoint sent by the remote control
+- Reading the setpoint confirmed by the PAC
+- MQTT publishing on change + periodic republish (60s)
+- OTA (Over The Air) updates
+- Remote debugging via Telnet (RemoteDebug)
 
-**Ce qui reste à faire :**
-- Envoi de commandes à la PAC (consigne température, ON/OFF)
-- Décodage complet de la partie "état machine" des trames longues
-- Lecture des codes erreur
+**What remains to be done:**
+- Sending commands to the PAC (temperature setpoint, ON/OFF)
+- Full decoding of the "machine state" part of the long frames
+- Reading error codes
 
 ## Architecture
 
-Le firmware complet tient dans un seul fichier : **`src/main.cpp`**.
+The whole firmware fits in a single file: **`src/main.cpp`**.
 
 ```
 ┌─────────────┐     RS485      ┌──────────┐     MQTT      ┌────────────────┐
@@ -34,35 +34,35 @@ Le firmware complet tient dans un seul fichier : **`src/main.cpp`**.
        ▲                             ▲
        │        RS485                │
        └─────────────────────────────┘
-              Télécommande filaire
+              Wired remote control
 ```
 
-**Topologie du bus :** trois appareils partagent le même bus RS485 half-duplex :
-1. La carte mère PAC
-2. La télécommande filaire d'origine
-3. Le Wemos D1 Mini (sniffer passif — ne transmet jamais)
+**Bus topology:** three devices share the same half-duplex RS485 bus:
+1. The PAC motherboard
+2. The original wired remote control
+3. The Wemos D1 Mini (passive sniffer — never transmits)
 
-Le Wemos est câblé **en parallèle** avec la télécommande sur le même faisceau.
+The Wemos is wired **in parallel** with the remote control on the same harness.
 
-## Protocole du bus (Jetline 90/95)
+## Bus protocol (Jetline 90/95)
 
-### Caractéristiques
-- Vitesse : **9600 baud, 8N1**
-- Cycle : **~190 ms** (2 heartbeats par seconde)
-- Séparateur inter-trames : octets `0x01` (idle bus)
-- CPU cadencé à **160 MHz** pour traitement temps réel
+### Characteristics
+- Speed: **9600 baud, 8N1**
+- Cycle: **~190 ms** (2 heartbeats per second)
+- Inter-frame separator: `0x01` bytes (idle bus)
+- CPU clocked at **160 MHz** for real-time processing
 
-### Types de trames identifiés
+### Identified frame types
 
-| Direction | En-tête | Taille | Description |
-|-----------|---------|--------|-------------|
-| remote → PAC | `XX 04 FF ...` | 12 B | Heartbeat télécommande (constant, ~98 ms) |
-| PAC → remote | `FD XX ...` | 6–13 B | ACK PAC |
-| PAC → remote | `[flags] <état> <capteurs>` | 25–36 B | Trame capteurs + état |
+| Direction | Header | Size | Description |
+|-----------|--------|------|-------------|
+| remote → PAC | `XX 04 FF ...` | 12 B | Remote heartbeat (constant, ~98 ms) |
+| PAC → remote | `FD XX ...` | 6–13 B | PAC ACK |
+| PAC → remote | `[flags] <state> <sensors>` | 25–36 B | Sensors + state frame |
 
-### Décodage des capteurs
+### Sensor decoding
 
-Les **9 derniers octets** de chaque burst long (≥ 25 B) contiennent les capteurs, terminés par `FF FF` :
+The **last 9 bytes** of each long burst (≥ 25 B) contain the sensors, terminated by `FF FF`:
 
 ```cpp
 water_in_temp    = ((0xFF - data[0]) >> 3) & 0x3F;  // °C
@@ -72,168 +72,168 @@ gas_temp         = ((0xFF - data[3]) >> 1) & 0x3F;  // °C
 water_out_temp   = ((0xFF - data[4]) >> 1) & 0x3F;  // °C
 // data[5] = 0xFF (constant)
 active_status    = ((0xFF - data[6]) >> 4) & 0x01;  // 1 = PAC ON
-// data[7-8] = FF FF (terminaison)
+// data[7-8] = FF FF (termination)
 ```
 
-La validation se fait par plage de température (5–45 °C) — pas d'en-tête fixe.
+Validation is done by temperature range (5–45 °C) — there is no fixed header.
 
-### Consigne (setpoint)
+### Setpoint
 
-La consigne est extraite de deux sources :
-- **Télécommande** (heartbeat 12B) : byte offset 9 → `setpoint = ((0xFF - byte) >> 1) & 0x3F`
-- **PAC** (trame d'état longue ≥15B) : byte offset 2 (ou 3 si préfixe FF) → `setpoint_confirmed = ((0xFF - byte) >> 3) & 0x3F`
+The setpoint is extracted from two sources:
+- **Remote control** (12B heartbeat): byte offset 9 → `setpoint = ((0xFF - byte) >> 1) & 0x3F`
+- **PAC** (long state frame ≥15B): byte offset 2 (or 3 if FF prefix) → `setpoint_confirmed = ((0xFF - byte) >> 3) & 0x3F`
 
-### Mode de fonctionnement
+### Operating mode
 
-Le **dernier byte** des trames d'état longues (≥15B avant le sensor tail) encode le mode :
+The **last byte** of the long state frames (≥15B before the sensor tail) encodes the mode:
 
-| Byte | Mode | Valeur MQTT |
-|------|------|-------------|
-| `0x6C` | Chauffage seul | `heat` |
-| `0x64` | Chauffage (variante) | `heat` |
-| `0x54` | Automatique (chaud + froid) | `auto` |
-| `0x5C` | Refroidissement seul | `cool` |
+| Byte | Mode | MQTT value |
+|------|------|------------|
+| `0x6C` | Heating only | `heat` |
+| `0x64` | Heating (variant) | `heat` |
+| `0x54` | Automatic (heat + cool) | `auto` |
+| `0x5C` | Cooling only | `cool` |
 
-> ⚠️ Ces valeurs sont issues de l'analyse d'une capture. `0x64` apparaît lors de transitions ou après un power cycle — il est provisoirement mappé sur `heat`.
+> ⚠️ These values come from the analysis of a single capture. `0x64` appears during transitions or after a power cycle — it is provisionally mapped to `heat`.
 
-## Problème résolu : WiFi non réactif
+## Solved problem: unresponsive WiFi
 
-### Le problème
+### The problem
 
-Sur ESP8266, **SoftwareSerial désactive TOUTES les interruptions** pendant la réception de chaque byte (~1ms par byte à 9600 baud). Le stack WiFi (qui partage le même CPU) ne peut pas traiter les paquets entrants → ping timeout, OTA impossible, telnet inaccessible.
+On ESP8266, **SoftwareSerial disables ALL interrupts** while receiving each byte (~1ms per byte at 9600 baud). The WiFi stack (which shares the same CPU) cannot process incoming packets → ping timeouts, OTA impossible, telnet unreachable.
 
-Paradoxalement, les publications MQTT sortantes fonctionnent (elles sont mises en file d'attente), mais tout ce qui nécessite une **réponse** entrante est bloqué.
+Paradoxically, outgoing MQTT publishes work (they are queued), but everything that requires an incoming **response** is blocked.
 
-### La solution
+### The solution
 
-1. **Lecture non-bloquante** : on ne lit que `PS.available()` bytes, jamais de `readBytes()` bloquant avec timeout.
+1. **Non-blocking reads**: only `PS.available()` bytes are read, never a blocking `readBytes()` with a timeout.
 
-2. **Mini-throttle** : on attend au minimum 5 ms entre deux lectures (ou 20+ bytes disponibles) pour accumuler des bytes au lieu de lire un par un.
+2. **Mini-throttle**: wait at least 5 ms between two reads (or until 20+ bytes are available) to accumulate bytes instead of reading them one by one.
 
-3. **Fenêtre WiFi pendant l'idle bus** : quand le bus est inactif (entre les cycles de trames), on coupe brièvement le RX SoftwareSerial (3 ms) pour laisser le stack WiFi traiter les paquets entrants.
+3. **WiFi window during bus idle**: when the bus is inactive (between frame cycles), the SoftwareSerial RX is briefly turned off (3 ms) to let the WiFi stack process incoming packets.
 
 ```cpp
 if (bus_is_idle && (now - last_wifi_window >= 50)) {
     PS.enableRx(false);
-    delay(3);  // fenêtre WiFi
+    delay(3);  // WiFi window
     PS.enableRx(true);
 }
 ```
 
-⚠️ **Ne jamais couper le RX pendant une trame active** — sinon on perd des bytes et les trames sont corrompues.
+⚠️ **Never turn RX off during an active frame** — otherwise bytes are lost and frames get corrupted.
 
-### Détection de l'idle bus
+### Bus idle detection
 
-Le flag `bus_is_idle` passe à `true` quand :
-- Le buffer résiduel est vide (tous les bursts ont été traités)
-- Il ne reste que des octets `0x01` (séparateurs)
-- Aucune nouvelle donnée depuis > 100 ms (timeout résiduel)
+The `bus_is_idle` flag becomes `true` when:
+- The residual buffer is empty (all bursts have been processed)
+- Only `0x01` bytes (separators) remain
+- No new data for > 100 ms (residual timeout)
 
 ## Hardware
 
-### Composants
+### Components
 - **Wemos D1 Mini** (ESP8266)
-- **MAX485** — interface RS485
-- **Convertisseur 12V → 5V** (min 2A)
-- Couverture WiFi à l'emplacement de la PAC
-- Boîtier IP67
+- **MAX485** — RS485 interface
+- **12V → 5V converter** (min 2A)
+- WiFi coverage at the PAC location
+- IP67 enclosure
 
-### Câblage
+### Wiring
 
 #### PAC → MAX485
-Le câble de la PAC a 4 fils :
-- **Vert + Jaune** : bus RS485 → A et B du MAX485
-- **Noir + Rouge** : alimentation 12V
+The PAC cable has 4 wires:
+- **Green + Yellow**: RS485 bus → A and B of the MAX485
+- **Black + Red**: 12V power supply
 
 #### MAX485 → Wemos D1 Mini
 
-| Broche MAX485 | GPIO Wemos | Pin Wemos | Fonction |
-|---------------|------------|-----------|----------|
-| RO (sortie)   | GPIO4      | D2        | RX données |
-| DI (entrée)   | GPIO5      | D1        | TX données |
-| DE + RE       | GPIO14     | D5        | Contrôle direction |
+| MAX485 pin | Wemos GPIO | Wemos pin | Function |
+|------------|------------|-----------|----------|
+| RO (output) | GPIO4     | D2        | RX data |
+| DI (input)  | GPIO5     | D1        | TX data |
+| DE + RE     | GPIO14    | D5        | Direction control |
 
-⚠️ **NE PAS utiliser GPIO2 (D4)** pour DE/RE — ce pin est HIGH au boot (strapping pin ESP8266), ce qui activerait brièvement le transmetteur et corromprait le bus.
+⚠️ **DO NOT use GPIO2 (D4)** for DE/RE — this pin is HIGH at boot (ESP8266 strapping pin), which would briefly enable the transmitter and corrupt the bus.
 
-DE/RE sont reliés ensemble et maintenus à **LOW en permanence** (mode réception only).
+DE/RE are tied together and kept **LOW permanently** (receive-only mode).
 
-### Alimentation
-- Premier flash : via USB de l'ordinateur
-- En fonctionnement : alimentation 12V de la PAC → convertisseur 12V/5V → Wemos (pin 5V) + MAX485 (VCC)
+### Power supply
+- First flash: via the computer's USB
+- In operation: 12V supply from the PAC → 12V/5V converter → Wemos (5V pin) + MAX485 (VCC)
 
 ## Installation
 
-### Prérequis
-- [PlatformIO](https://platformio.org/platformio-ide) (VSCode ou CLI)
+### Prerequisites
+- [PlatformIO](https://platformio.org/platformio-ide) (VSCode or CLI)
 
-### Configuration initiale
+### Initial configuration
 
 ```bash
-# Copier le fichier de secrets
+# Copy the secrets file
 cp src/secrets.h.sample include/secrets.h
-# Éditer avec vos paramètres WiFi et MQTT
+# Edit it with your WiFi and MQTT settings
 ```
 
-Remplir dans `include/secrets.h` :
+Fill in `include/secrets.h`:
 - `WIFI_SSID`
 - `WIFI_PASSWORD`
 - `MQTT_BROKER_ADDR`
 
-### Compilation et flash
+### Build and flash
 
 ```bash
-# Compiler
+# Build
 pio run
 
-# Flash via USB (premier flash)
+# Flash via USB (first flash)
 pio run -t upload
 
-# Flash via OTA (après le premier flash)
+# Flash via OTA (after the first flash)
 pio run -t upload --upload-port 10.0.0.72
 ```
 
-### Debug à distance
+### Remote debugging
 
 ```bash
-telnet <IP_DU_WEMOS>
+telnet <WEMOS_IP>
 ```
 
-Utiliser les commandes RemoteDebug pour changer le niveau de log (verbose, debug, info, warning, error).
+Use the RemoteDebug commands to change the log level (verbose, debug, info, warning, error).
 
-## Topics MQTT
+## MQTT topics
 
-### Valeurs publiées (lecture)
+### Published values (read)
 
-| Topic | Description | Unité |
-|-------|-------------|-------|
-| `poolheater/values/water_in_temp` | Température eau entrée | °C |
-| `poolheater/values/water_out_temp` | Température eau sortie | °C |
-| `poolheater/values/air_ambient_temp` | Température air ambiant | °C |
-| `poolheater/values/coil_temp` | Température serpentin | °C |
-| `poolheater/values/gaz_temp` | Température gaz | °C |
-| `poolheater/values/active_status` | PAC allumée | 0/1 |
-| `poolheater/values/heating` | Compresseur actif | 0/1 |
-| `poolheater/values/setpoint` | Consigne demandée (télécommande) | °C |
-| `poolheater/values/setpoint_confirmed` | Consigne confirmée (PAC) | °C |
-| `poolheater/values/mode` | Mode de fonctionnement | `heat` / `auto` / `cool` |
-| `poolheater/values/error` | Code erreur PAC (⚠️ désactivé — en cours de calibration) | `none` |
-| `poolheater/values/state_raw` | Trame d'état brute (hex) | Pour analyse |
-| `poolheater/status` | État connexion (retained) | ON |
+| Topic | Description | Unit |
+|-------|-------------|------|
+| `poolheater/values/water_in_temp` | Water inlet temperature | °C |
+| `poolheater/values/water_out_temp` | Water outlet temperature | °C |
+| `poolheater/values/air_ambient_temp` | Ambient air temperature | °C |
+| `poolheater/values/coil_temp` | Coil temperature | °C |
+| `poolheater/values/gaz_temp` | Gas temperature | °C |
+| `poolheater/values/active_status` | PAC powered on | 0/1 |
+| `poolheater/values/heating` | Compressor active | 0/1 |
+| `poolheater/values/setpoint` | Requested setpoint (remote control) | °C |
+| `poolheater/values/setpoint_confirmed` | Setpoint confirmed (PAC) | °C |
+| `poolheater/values/mode` | Operating mode | `heat` / `auto` / `cool` |
+| `poolheater/values/error` | PAC error code (⚠️ disabled — being calibrated) | `none` |
+| `poolheater/values/state_raw` | Raw state frame (hex) | For analysis |
+| `poolheater/status` | Connection state (retained) | ON |
 
-### Commandes (écriture)
+### Commands (write)
 
 | Topic | Description |
 |-------|-------------|
-| `poolheater/command/probe` | Déclenche un test d'émission TX (expérimental) |
+| `poolheater/command/probe` | Triggers a TX test transmission (experimental) |
 
-### Stratégie de publication
-- Publication sur **changement de valeur** (pas de flood)
-- **Republication complète toutes les 60 secondes** pour garantir la fraîcheur dans HA
-- Reconnexion MQTT throttlée à 5 secondes entre les tentatives
+### Publishing strategy
+- Publish on **value change** (no flooding)
+- **Full republish every 60 seconds** to guarantee freshness in HA
+- MQTT reconnection throttled to 5 seconds between attempts
 
-## Intégration Home Assistant
+## Home Assistant integration
 
-Dans votre `configuration.yaml` :
+In your `configuration.yaml`:
 
 ```yaml
 mqtt:
@@ -309,32 +309,32 @@ mqtt:
       icon: "mdi:alert-circle"
 ```
 
-### Valeurs du mode
+### Mode values
 
-| Valeur MQTT | Mode | Description |
-|-------------|------|-------------|
-| `heat` | Chauffage seul | Mode 2 — la PAC chauffe uniquement |
-| `auto` | Automatique | Mode 1 — chauffage + refroidissement |
-| `cool` | Refroidissement seul | Mode 0 — la PAC refroidit uniquement |
+| MQTT value | Mode | Description |
+|------------|------|-------------|
+| `heat` | Heating only | Mode 2 — the PAC only heats |
+| `auto` | Automatic | Mode 1 — heating + cooling |
+| `cool` | Cooling only | Mode 0 — the PAC only cools |
 
 ![alt](img/HA_integration.png)
 
-## Calcul d'efficience (COP et puissance thermique)
+## Efficiency calculation (COP and thermal power)
 
-Pour visualiser l'efficience de la PAC dans Home Assistant, on utilise des **template sensors** qui calculent :
-- **Delta T** : différence entre water_out et water_in (°C)
-- **Puissance thermique** : P = débit × ΔT × 1.163 (kW)
-- **COP estimé** : basé sur la courbe constructeur Poolex Jetline 90 en fonction de la température air
+To visualise the PAC efficiency in Home Assistant, **template sensors** are used to compute:
+- **Delta T**: difference between water_out and water_in (°C)
+- **Thermal power**: P = flow rate × ΔT × 1.163 (kW)
+- **Estimated COP**: based on the Poolex Jetline 90 manufacturer curve as a function of air temperature
 
-### Configuration Home Assistant
+### Home Assistant configuration
 
-Ajouter dans `configuration.yaml` :
+Add to `configuration.yaml`:
 
 ```yaml
-# --- Input number pour le débit PAC ---
+# --- Input number for the PAC flow rate ---
 input_number:
   pool_hp_flow_rate:
-    name: "Débit PAC (m³/h)"
+    name: "PAC flow rate (m³/h)"
     min: 1
     max: 6
     step: 0.1
@@ -342,7 +342,7 @@ input_number:
     unit_of_measurement: "m³/h"
     icon: mdi:water-pump
 
-# --- Template sensors pour l'efficience ---
+# --- Template sensors for efficiency ---
 template:
   - sensor:
       - name: "Pool HP Delta T"
@@ -358,7 +358,7 @@ template:
             unknown
           {% endif %}
 
-      - name: "Pool HP Puissance thermique"
+      - name: "Pool HP Thermal power"
         unique_id: "pool_hp_thermal_power"
         unit_of_measurement: "kW"
         device_class: "power"
@@ -373,14 +373,14 @@ template:
             0
           {% endif %}
 
-      - name: "Pool HP COP estimé"
+      - name: "Pool HP Estimated COP"
         unique_id: "pool_hp_cop_estimated"
         unit_of_measurement: "COP"
         icon: mdi:lightning-bolt-circle
         state: >
-          {# COP estimé Poolex Jetline 90 selon température air #}
-          {# Courbe constructeur approximée : COP ≈ 3.0 + (T_air - 15) × 0.15 #}
-          {# Plafonné entre 2.5 et 7.0 #}
+          {# Estimated COP for the Poolex Jetline 90 based on air temperature #}
+          {# Approximated manufacturer curve: COP ≈ 3.0 + (T_air - 15) × 0.15 #}
+          {# Clamped between 2.5 and 7.0 #}
           {% set t_air = states('sensor.heat_pump_ambient_air_temperature') | float(0) %}
           {% set heating = states('sensor.heat_pump_status') | int(0) %}
           {% if heating == 1 and t_air > 0 %}
@@ -390,13 +390,13 @@ template:
             unknown
           {% endif %}
 
-      - name: "Pool HP Puissance électrique estimée"
+      - name: "Pool HP Estimated electrical power"
         unique_id: "pool_hp_electrical_power"
         unit_of_measurement: "kW"
         device_class: "power"
         state: >
-          {% set thermal = states('sensor.pool_hp_puissance_thermique') | float(0) %}
-          {% set cop = states('sensor.pool_hp_cop_estime') | float(0) %}
+          {% set thermal = states('sensor.pool_hp_thermal_power') | float(0) %}
+          {% set cop = states('sensor.pool_hp_estimated_cop') | float(0) %}
           {% if cop > 0 and thermal > 0 %}
             {{ (thermal / cop) | round(2) }}
           {% else %}
@@ -404,41 +404,41 @@ template:
           {% endif %}
 ```
 
-### Notes sur le COP
+### Notes on the COP
 
-La courbe COP est **approximée** à partir des données constructeur de la Jetline Selection 90 :
+The COP curve is **approximated** from the Jetline Selection 90 manufacturer data:
 
-| Temp. air | COP estimé | Puissance thermique |
-|-----------|-----------|-------------------|
+| Air temp. | Estimated COP | Thermal power |
+|-----------|---------------|---------------|
 | 10°C | ~2.3 | ~5.5 kW |
 | 15°C | ~3.0 | ~7.0 kW |
 | 20°C | ~3.8 | ~8.5 kW |
 | 26°C | ~4.6 | ~9.5 kW |
 | 30°C | ~5.3 | ~10 kW |
 
-> ⚠️ Le COP réel dépend aussi de la température de l'eau et de l'humidité. Pour un COP précis, il faudrait un compteur électrique (type Shelly 1PM) sur l'alimentation de la PAC.
+> ⚠️ The real COP also depends on water temperature and humidity. For an accurate COP, you would need an electricity meter (e.g. a Shelly 1PM) on the PAC power supply.
 
-> 💡 **Débit PAC** : Ajustez `input_number.pool_hp_flow_rate` selon votre installation. La Poolex Jetline 90 recommande 1.5–3.5 m³/h à travers l'échangeur (pas le débit total de la pompe de filtration).
+> 💡 **PAC flow rate**: adjust `input_number.pool_hp_flow_rate` to match your installation. The Poolex Jetline 90 recommends 1.5–3.5 m³/h through the exchanger (not the total flow of the filtration pump).
 
-## Fichiers de log de trames
+## Frame log files
 
-Le répertoire `src/frame_logs/` contient des captures brutes du bus UART pour le reverse-engineering :
-- Captures avec télécommande + PAC (trames 12-36 B)
-- `motherboard_only.txt` : PAC seule sans télécommande (trames 93 B commençant par `0x0C`)
+The `src/frame_logs/` directory contains raw UART bus captures for reverse-engineering:
+- Captures with remote control + PAC (12–36 B frames)
+- `motherboard_only.txt`: PAC alone without the remote control (93 B frames starting with `0x0C`)
 
-## Références
+## References
 
-- Point de départ : [esp8266_poolstar](https://github.com/cribskip/esp8266_poolstar)
-- Discussion protocole : [issue Cyril](https://github.com/cribskip/esp8266_poolstar/issues/2)
-- [Version Python](https://github.com/cyrilpawelko/poolstarmon/tree/main/micropython)
-- [Thread Modbus Jeedom](https://community.jeedom.com/t/domotiser-pac-inverter-de-piscine-irrijardin-warmpool-aide-connection-rs485/42440/77?page=5)
-- Reverse Hayward : [Forum Arduino](https://forum.arduino.cc/t/resolu-reverse-engineering-protocole-thermopompe-hayward/249705)
-- Reverse Poolex Dreamline : [Repository](https://github.com/CDX-24/PoolexDreamlineController/tree/main)
+- Starting point: [esp8266_poolstar](https://github.com/cribskip/esp8266_poolstar)
+- Protocol discussion: [Cyril's issue](https://github.com/cribskip/esp8266_poolstar/issues/2)
+- [Python version](https://github.com/cyrilpawelko/poolstarmon/tree/main/micropython)
+- [Jeedom Modbus thread](https://community.jeedom.com/t/domotiser-pac-inverter-de-piscine-irrijardin-warmpool-aide-connection-rs485/42440/77?page=5)
+- Hayward reverse-engineering: [Arduino forum](https://forum.arduino.cc/t/resolu-reverse-engineering-protocole-thermopompe-hayward/249705)
+- Poolex Dreamline reverse-engineering: [Repository](https://github.com/CDX-24/PoolexDreamlineController/tree/main)
 
-## Contribuer
+## Contributing
 
-Les pull requests sont les bienvenues. Pour les changements majeurs, ouvrez d'abord une issue.
+Pull requests are welcome. For major changes, please open an issue first.
 
-## Licence
+## License
 
 [MIT](https://choosealicense.com/licenses/mit/)
